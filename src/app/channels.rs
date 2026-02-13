@@ -1,0 +1,121 @@
+use libp2p::PeerId;
+use tokio::sync::mpsc;
+
+use crate::chat::LogEntry;
+use crate::network::event::NetworkCommand;
+use crate::protocol::gossip::FileAnnounce;
+use crate::room::RoomLifetime;
+use crate::transfer::DownloadStatus;
+
+// ── AppCommand (TUI → App) ────────────────────────────────────────────────────
+
+/// TUI/CLI에서 앱 레이어로 보내는 명령.
+#[derive(Debug)]
+pub enum AppCommand {
+    // ── 인증 ─────────────────────────────────────────────────────────────────
+    Login { id: String, password: String },
+    Register { id: String, nickname: String, password: String },
+    DeleteAccount { id: String, password: String },
+
+    // ── 방 ───────────────────────────────────────────────────────────────────
+    CreateRoom { name: String, lifetime: RoomLifetime },
+    JoinRoom { room_id: [u8; 32] },
+    LeaveRoom,
+    ListRooms,
+
+    // ── 채팅 ─────────────────────────────────────────────────────────────────
+    SendMessage { text: String },
+    ListPeers,
+
+    // ── 초대 ─────────────────────────────────────────────────────────────────
+    GenerateInviteCode,
+    EnterInviteCode { code: String },
+    AcceptInvite { number: Option<u32> },
+    /// mDNS 탐색 목록에서 피어를 직접 초대 (인트라넷 모드).
+    InviteMdnsPeer { peer_id_bytes: Vec<u8> },
+    /// 친구를 PeerId로 초대 (DHT 조회 → 직접 연결).
+    InviteFriend { peer_id_bytes: Vec<u8> },
+
+    // ── 파일 ─────────────────────────────────────────────────────────────────
+    ShareFile { path: String },
+    StartDownload { file_hash: [u8; 32], file_name: String, chunk_count: u32 },
+    PauseDownload { number: u32 },
+    ResumeDownload { number: u32 },
+    CancelDownload { number: u32 },
+    MoveDownloadTop { number: u32 },
+    MoveDownloadUp { number: u32 },
+    MoveDownloadDown { number: u32 },
+    SeedPause { number: u32 },
+    SeedResume { number: u32 },
+    RemoveSeed { number: u32, delete_file: bool },
+
+    // ── 설정 ─────────────────────────────────────────────────────────────────
+    ChangeNickname { new_nickname: String },
+    ChangePassword { current: String, new_pw: String },
+
+    // ── 친구 ─────────────────────────────────────────────────────────────────
+    AddFriend { peer_id_bytes: Vec<u8> },
+    RemoveFriend { peer_id_bytes: Vec<u8> },
+
+    // ── 시스템 ───────────────────────────────────────────────────────────────
+    Shutdown,
+}
+
+// ── AppEvent (App → TUI) ──────────────────────────────────────────────────────
+
+/// 앱 레이어에서 TUI/CLI로 보내는 이벤트.
+#[derive(Debug)]
+pub enum AppEvent {
+    // ── 피드 항목 ─────────────────────────────────────────────────────────────
+    FeedEntry(LogEntry),
+
+    // ── 피어 상태 ─────────────────────────────────────────────────────────────
+    PeerJoined { peer_id: PeerId, nickname: String },
+    PeerLeft { peer_id: PeerId },
+    PeerList { peers: Vec<(PeerId, String)> },
+
+    // ── 방 이벤트 ─────────────────────────────────────────────────────────────
+    RoomList { rooms: Vec<([u8; 32], String, Option<u32>)> }, // (room_id, name, peer_count)
+    RoomExpired,
+    JoinedRoom { room_id: [u8; 32], name: String },
+    LeftRoom,
+
+    // ── 파일 이벤트 ───────────────────────────────────────────────────────────
+    FileAnnounced { announce: FileAnnounce },
+    FileRemoved { file_hash: [u8; 32] },
+    DownloadProgress {
+        file_hash: [u8; 32],
+        completed_chunks: u32,
+        total_chunks: u32,
+        status: DownloadStatus,
+    },
+    DownloadComplete { file_hash: [u8; 32], file_name: String },
+
+    // ── 초대 이벤트 ───────────────────────────────────────────────────────────
+    InviteCodeGenerated { code: String },
+    InviteReceived { from_peer: PeerId, from_nickname: String, room_name: String, number: u32 },
+    InviteDecision { accepted: bool, by_peer: PeerId },
+    InviteExpired,
+
+    // ── mDNS 피어 목록 (인트라넷 초대용) ─────────────────────────────────────
+    /// mDNS로 발견된 로컬 네트워크 피어 목록 갱신.
+    MdnsPeersUpdated { peers: Vec<(PeerId, String)> }, // (PeerId, display addr)
+
+    // ── 오류 / 알림 ───────────────────────────────────────────────────────────
+    Error(String),
+    Notice(String),
+
+    // ── 인증 결과 ─────────────────────────────────────────────────────────────
+    LoginSuccess { nickname: String },
+    LoginFailed(String),
+    RegisterSuccess,
+    RegisterFailed(String),
+}
+
+// ── 채널 타입 별칭 ────────────────────────────────────────────────────────────
+
+pub type AppCommandTx = mpsc::Sender<AppCommand>;
+pub type AppCommandRx = mpsc::Receiver<AppCommand>;
+pub type AppEventTx = mpsc::Sender<AppEvent>;
+pub type AppEventRx = mpsc::Receiver<AppEvent>;
+pub type NetworkCommandTx = mpsc::Sender<NetworkCommand>;
