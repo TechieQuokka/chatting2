@@ -6,7 +6,7 @@
 |--------|------|
 | ChatMessage | 채팅 메시지 (발신자 PeerId + 발신 시점 닉네임 포함) — 닉네임 변경 시 별도 브로드캐스트 없이 다음 메시지 발신으로 자연 전파 |
 | FileAnnounce | 새 파일/폴더 공유 알림 (단일 메시지로 전송, 아래 구조 참고) |
-| FileRemove | 파일 공유 철회 알림 |
+| FileRemove | 파일 공유 철회 알림 (발신자가 더 이상 시딩하지 않음을 의미) |
 | BitfieldUpdate | 청크 보유 현황 브로드캐스트 (새 청크 획득 시) |
 
 ### FileAnnounce 구조
@@ -43,7 +43,7 @@
 | ChunkResponse | 청크 데이터 + 청크 인덱스 |
 | BitfieldRequest | 방 입장 시 현재 파일 상태 요청 |
 | BitfieldResponse | 전체 파일 목록 + 청크 보유 현황 응답 |
-| InviteRequest | 피초대자 → 방 멤버 / 입장 요청 (방 내부 ID) |
+| InviteRequest | 피초대자 → 방 멤버 / 입장 요청 (방 내부 ID + 초대 코드 생성자 PeerId) |
 | InviteResponse | 방 멤버 → 피초대자 / 수락: 방 키 포함, 거절: 거절 사유만 |
 
 - 청크 데이터: 방 키로 AES-256-GCM 암호화
@@ -53,13 +53,22 @@
 
 ### 온라인 피어 있을 때
 
-1. 온라인 피어에게 BitfieldRequest 전송
-2. BitfieldResponse 수신 → 전체 파일 목록 + 청크 현황 파악
+1. 온라인 피어 중 임의의 1개에게 BitfieldRequest 전송
+2. BitfieldResponse 수신 → 전체 파일 목록 + 청크 현황 초기 파악
 3. rooms.enc 갱신 (오프라인 중 추가/삭제된 파일 반영)
-4. 이후 변경 사항은 GossipSub BitfieldUpdate로 수신
+4. 이후 변경 사항은 GossipSub BitfieldUpdate로 수신 → 자연 수렴
 
 ### 온라인 피어 없을 때 (혼자 재활성화)
 
 1. rooms.enc 기준 파일 목록 표시
 2. 상태바에 "마지막 동기화: N일 전" 표시
 3. 이후 다른 피어 접속 시 위 흐름(온라인 피어 있을 때)으로 자동 동기화 → rooms.enc 갱신
+
+### 동기화 일관성 모델 (최종 일관성)
+
+토렌트 방식과 동일하게 **최종 일관성(eventual consistency)** 을 채택:
+
+- BitfieldRequest 응답 피어가 오프라인 중 변경사항을 모를 수 있음 → 초기 상태가 stale할 수 있음
+- 이후 온라인인 다른 피어들의 GossipSub BitfieldUpdate 수신으로 자연히 최신 상태로 수렴
+- 단기 불일치는 허용된 설계 — 중앙 권위 없이 분산 상태를 맞추는 토렌트 원리 그대로 적용
+- 파일 목록도 동일: 새 피어 접속 시 FileAnnounce/FileRemove GossipSub 수신으로 자동 반영
