@@ -43,6 +43,7 @@ pub enum LoginField {
 #[derive(Debug, Default)]
 pub struct RegisterState {
     pub id_input: String,
+    pub nickname_input: String,
     pub pw_input: String,
     pub pw_confirm: String,
     pub focused: RegisterField,
@@ -53,6 +54,7 @@ pub struct RegisterState {
 pub enum RegisterField {
     #[default]
     Id,
+    Nickname,
     Pw,
     PwConfirm,
 }

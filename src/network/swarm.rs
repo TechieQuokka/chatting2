@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use libp2p::{
-    kad, mdns, noise,
+    kad, noise,
     swarm::SwarmEvent,
     tcp, yamux, Multiaddr, Swarm,
 };
@@ -190,7 +190,7 @@ async fn handle_swarm_event(
             // GossipSub
             AppBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                 message,
-                propagation_source,
+                propagation_source: _,
                 ..
             }) => Some(NetworkEvent::GossipMessage {
                 topic: message.topic,

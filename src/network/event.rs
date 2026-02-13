@@ -1,4 +1,4 @@
-use libp2p::{gossipsub, identify, kad, mdns, ping, PeerId, request_response, Multiaddr};
+use libp2p::{gossipsub, identify, kad, PeerId, request_response, Multiaddr};
 
 use super::codec::{AppRequest, AppResponse};
 

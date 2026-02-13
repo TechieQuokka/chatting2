@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 
 use super::screen::*;
 
@@ -99,7 +99,7 @@ fn render_login(frame: &mut Frame, state: &LoginState) {
 // ── 계정 등록 화면 ────────────────────────────────────────────────────────────
 
 fn render_register(frame: &mut Frame, state: &RegisterState) {
-    let area = center_rect(42, 12, frame.area());
+    let area = center_rect(42, 14, frame.area());
     let block = Block::default().borders(Borders::ALL).title(" 계정 등록 ");
     frame.render_widget(block, area);
 
@@ -113,22 +113,24 @@ fn render_register(frame: &mut Frame, state: &RegisterState) {
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
+            Constraint::Length(1),
         ])
         .split(inner);
 
-    frame.render_widget(Paragraph::new(format!("ID : [{}]", state.id_input)), chunks[0]);
+    frame.render_widget(Paragraph::new(format!("ID       : [{}]", state.id_input)), chunks[0]);
+    frame.render_widget(Paragraph::new(format!("닉네임   : [{}]", state.nickname_input)), chunks[1]);
     frame.render_widget(
-        Paragraph::new(format!("PW : [{}]", "*".repeat(state.pw_input.len()))),
-        chunks[1],
-    );
-    frame.render_widget(
-        Paragraph::new(format!("PW 확인 : [{}]", "*".repeat(state.pw_confirm.len()))),
+        Paragraph::new(format!("PW       : [{}]", "*".repeat(state.pw_input.len()))),
         chunks[2],
     );
-    frame.render_widget(Paragraph::new("Enter 등록  Esc 취소"), chunks[3]);
+    frame.render_widget(
+        Paragraph::new(format!("PW 확인  : [{}]", "*".repeat(state.pw_confirm.len()))),
+        chunks[3],
+    );
+    frame.render_widget(Paragraph::new("Tab 다음 항목  Enter 등록  Esc 취소"), chunks[4]);
 
     if let Some(err) = &state.error {
-        frame.render_widget(error_line(err), chunks[5]);
+        frame.render_widget(error_line(err), chunks[6]);
     }
 }
 
@@ -577,7 +579,6 @@ fn render_chat(frame: &mut Frame, state: &ChatState) {
 }
 
 fn feed_item_to_line(item: &FeedItem) -> Line<'static> {
-    use chrono::prelude::*;
     let dt = chrono::DateTime::<chrono::Local>::from(
         std::time::UNIX_EPOCH + std::time::Duration::from_millis(item.timestamp_ms)
     );

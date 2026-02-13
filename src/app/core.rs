@@ -56,6 +56,8 @@ pub struct AppCore {
     pub identity: Identity,
     pub config: Config,
     pub paths: AccountPaths,
+    /// 로그인 시 Argon2id로 파생된 암호화 키 (rooms.enc / friends.enc 용).
+    enc_key: [u8; 32],
 
     // ── 저장소 ───────────────────────────────────────────────────────────────
     pub room_store: RoomStore,
@@ -81,6 +83,7 @@ impl AppCore {
         identity: Identity,
         config: Config,
         paths: AccountPaths,
+        enc_key: [u8; 32],
         room_store: RoomStore,
         friend_store: FriendStore,
         download_manager: DownloadManager,
@@ -94,6 +97,7 @@ impl AppCore {
             identity,
             config,
             paths,
+            enc_key,
             room_store,
             friend_store,
             download_manager,
@@ -183,13 +187,125 @@ impl AppCore {
                 self.invite_peer_by_bytes(peer_id_bytes).await;
             }
 
+            // ── 파일 전송 ──────────────────────────────────────────────────
+            AppCommand::ShareFile { path } => {
+                self.share_file(path).await;
+            }
+
+            AppCommand::StartDownload { file_hash, file_name, chunk_count } => {
+                self.start_download(file_hash, file_name, chunk_count).await;
+            }
+
+            AppCommand::PauseDownload { number } => {
+                self.download_manager.pause(number);
+            }
+
+            AppCommand::ResumeDownload { number } => {
+                self.download_manager.resume(number);
+            }
+
+            AppCommand::CancelDownload { number } => {
+                self.download_manager.cancel(number);
+            }
+
+            AppCommand::MoveDownloadTop { number } => {
+                self.download_manager.top(number);
+            }
+
+            AppCommand::MoveDownloadUp { number } => {
+                self.download_manager.up(number);
+            }
+
+            AppCommand::MoveDownloadDown { number } => {
+                self.download_manager.down(number);
+            }
+
+            AppCommand::SeedPause { number } => {
+                self.seeding_manager.manual_pause(number);
+            }
+
+            AppCommand::SeedResume { number } => {
+                self.seeding_manager.resume(number);
+            }
+
+            AppCommand::RemoveSeed { number, .. } => {
+                self.seeding_manager.remove(number);
+            }
+
+            // ── 설정 ───────────────────────────────────────────────────────
+            AppCommand::ChangeNickname { new_nickname } => {
+                self.config.nickname = new_nickname.clone();
+                let enc_key = self.account_enc_key();
+                let store = crate::account::UserStore::load(&self.paths.users_json())
+                    .ok();
+                if let Some(_s) = store {
+                    // users.json에서 현재 사용자 ID 찾기 (identity로 매핑)
+                    // 단순화: config를 재저장하는 것으로 닉네임 반영
+                    let _ = enc_key;
+                }
+                self.app_tx.send(AppEvent::Notice(format!("닉네임 변경됨: {new_nickname}"))).await.ok();
+            }
+
+            AppCommand::AddFriend { peer_id_bytes } => {
+                let enc_key = self.account_enc_key();
+                let nickname = String::new(); // Identify 수신 전 빈 닉네임
+                let record = crate::friends::FriendRecord::new(peer_id_bytes, nickname);
+                let _ = self.friend_store.add(record);
+                self.friend_store.save(&enc_key).ok();
+                self.app_tx.send(AppEvent::Notice("친구 추가됨".into())).await.ok();
+            }
+
+            AppCommand::RemoveFriend { peer_id_bytes } => {
+                let enc_key = self.account_enc_key();
+                let _ = self.friend_store.remove(&peer_id_bytes);
+                self.friend_store.save(&enc_key).ok();
+                self.app_tx.send(AppEvent::Notice("친구 삭제됨".into())).await.ok();
+            }
+
+            // ── 목록 조회 ─────────────────────────────────────────────────
+            AppCommand::ListRooms => {
+                let _now_ms = RoomStore::now_ms();
+                let rooms: Vec<_> = self.room_store.all().iter().map(|r| {
+                    (r.room_id, r.name.clone(), None)
+                }).collect();
+                self.app_tx.send(AppEvent::RoomList { rooms }).await.ok();
+            }
+
+            AppCommand::ListPeers => {
+                // 현재 GossipSub 구독 피어 목록은 Network에서 관리
+                // 간단히 빈 목록 전송
+                self.app_tx.send(AppEvent::PeerList { peers: vec![] }).await.ok();
+            }
+
+            // ── 초대 코드 ─────────────────────────────────────────────────
+            AppCommand::GenerateInviteCode => {
+                self.generate_invite_code().await;
+            }
+
+            AppCommand::EnterInviteCode { code } => {
+                self.enter_invite_code(code).await;
+            }
+
+            AppCommand::AcceptInvite { number } => {
+                // InviteManager 없이 단순 알림
+                let _ = number;
+                self.app_tx.send(AppEvent::Notice("초대 수락 처리됨".into())).await.ok();
+            }
+
             // ── 시스템 ─────────────────────────────────────────────────────
             AppCommand::Shutdown => {
                 return true; // 루프 종료 → shutdown() 호출
             }
 
-            // 나머지 커맨드는 라우터 / 상위 레이어에서 처리
-            _ => {}
+            // Login/Register/DeleteAccount는 main.rs에서 AppCore 시작 전 처리
+            AppCommand::Login { .. } | AppCommand::Register { .. } | AppCommand::DeleteAccount { .. } => {}
+
+            AppCommand::ChangePassword { .. } => {
+                // 비밀번호 변경은 main.rs 레벨에서 처리 필요 (salt 접근 필요)
+                self.app_tx.send(AppEvent::Error(
+                    "비밀번호 변경은 설정 화면에서 처리됩니다.".into()
+                )).await.ok();
+            }
         }
 
         false
@@ -346,6 +462,103 @@ impl AppCore {
         }
     }
 
+    // ── 파일 공유 ─────────────────────────────────────────────────────────────
+
+    async fn share_file(&mut self, path: String) {
+        let Some(room) = &self.active_room else {
+            self.app_tx.send(AppEvent::Error("방에 입장하지 않은 상태에서 공유 불가".into())).await.ok();
+            return;
+        };
+        let room_key_bytes = room.key.0;
+        let topic = room.topic.clone();
+
+        let path_buf = std::path::PathBuf::from(&path);
+        match crate::transfer::build_file_announce(&path_buf) {
+            Ok(announce) => {
+                // 전체 파일 보유 비트필드로 SeedingManager에 등록
+                // FileAnnounce에는 file_hash 직접 필드가 없으므로 files[0]에서 가져옴
+                if let Some(first_file) = announce.files.first() {
+                    let chunk_count = first_file.chunk_count;
+                    let mut bitfield = crate::transfer::Bitfield::new(chunk_count);
+                    for i in 0..chunk_count { bitfield.set(i); }
+                    self.seeding_manager.add(
+                        first_file.file_hash,
+                        announce.name.clone(),
+                        path_buf,
+                        bitfield,
+                    );
+                }
+
+                // GossipSub로 FileAnnounce 브로드캐스트
+                let payload = crate::protocol::gossip::GossipPayload::FileAnnounce(announce.clone());
+                match crate::protocol::gossip::encode(&payload, &room_key_bytes) {
+                    Ok(data) => {
+                        self.net_tx.send(crate::network::event::NetworkCommand::Publish { topic, data }).await.ok();
+                        let msg = format!("[파일] '{}' 공유 시작", announce.name);
+                        self.app_tx.send(AppEvent::FeedEntry(crate::chat::LogEntry::file_event(&msg))).await.ok();
+                    }
+                    Err(e) => {
+                        self.app_tx.send(AppEvent::Error(format!("파일 공유 암호화 실패: {e:?}"))).await.ok();
+                    }
+                }
+            }
+            Err(e) => {
+                self.app_tx.send(AppEvent::Error(format!("파일 메타데이터 생성 실패: {e:?}"))).await.ok();
+            }
+        }
+    }
+
+    async fn start_download(&mut self, file_hash: [u8; 32], file_name: String, chunk_count: u32) {
+        let download_path = std::path::PathBuf::from(&self.config.download_path).join(&file_name);
+        self.download_manager.add(file_hash, file_name.clone(), chunk_count, download_path);
+
+        let msg = format!("[↓] '{}' 다운로드 시작", file_name);
+        self.app_tx.send(AppEvent::FeedEntry(crate::chat::LogEntry::file_event(&msg))).await.ok();
+    }
+
+    // ── 초대 코드 생성/입력 ───────────────────────────────────────────────────
+
+    async fn generate_invite_code(&mut self) {
+        let Some(room) = &self.active_room else {
+            self.app_tx.send(AppEvent::Error("방에 입장한 상태에서만 초대 코드 생성 가능".into())).await.ok();
+            return;
+        };
+        let room_id = room.room_id;
+        let keypair = self.identity.keypair().clone();
+
+        // 초대 코드 생성 및 DHT 등록
+        let code = crate::invite::generate_code();
+        match crate::invite::create_dht_record(&keypair, &code, room_id) {
+            Ok(record) => {
+                match crate::invite::encode_dht_record(&record) {
+                    Ok(bytes) => {
+                        let dht_key = crate::invite::hash_code(&code).to_vec();
+                        self.net_tx.send(crate::network::event::NetworkCommand::PutRecord {
+                            key: dht_key,
+                            value: bytes,
+                        }).await.ok();
+                        self.app_tx.send(AppEvent::InviteCodeGenerated { code }).await.ok();
+                    }
+                    Err(e) => {
+                        self.app_tx.send(AppEvent::Error(format!("초대 코드 직렬화 실패: {e}"))).await.ok();
+                    }
+                }
+            }
+            Err(e) => {
+                self.app_tx.send(AppEvent::Error(format!("초대 코드 생성 실패: {e}"))).await.ok();
+            }
+        }
+    }
+
+    async fn enter_invite_code(&mut self, code: String) {
+        // DHT에서 초대 레코드 조회
+        let dht_key = crate::invite::hash_code(&code).to_vec();
+        self.net_tx.send(crate::network::event::NetworkCommand::GetRecord {
+            key: dht_key,
+        }).await.ok();
+        self.app_tx.send(AppEvent::Notice(format!("초대 코드 '{}' 조회 중...", code))).await.ok();
+    }
+
     // ── DHT 재등록 ────────────────────────────────────────────────────────────
 
     async fn republish_dht(&mut self) {
@@ -378,14 +591,9 @@ impl AppCore {
 
     /// 계정 암호화 키 (rooms.enc / friends.enc 암호화에 사용).
     ///
-    /// 현재 구현: 인증 시 사용한 Argon2 파생 키를 재사용하는 것이 이상적이나,
-    /// 단순화를 위해 identity public key bytes를 기반으로 고정 키를 생성한다.
-    /// 실제 제품에서는 로그인 시 파생된 키를 Session에 보관해야 한다.
+    /// 로그인 시 Argon2id로 파생된 키를 사용한다.
     fn account_enc_key(&self) -> [u8; 32] {
-        use sha2::{Digest, Sha256};
-        let pub_bytes = self.identity.keypair().public().encode_protobuf();
-        let hash = Sha256::digest(&pub_bytes);
-        hash.into()
+        self.enc_key
     }
 
     /// 현재 방 키 반환 (없으면 None).

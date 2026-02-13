@@ -22,6 +22,7 @@ use super::{
 ///       friends.enc      (나중에)
 ///       chatting2.pid
 /// ```
+#[derive(Clone)]
 pub struct AccountPaths {
     pub data_root: PathBuf,
 }

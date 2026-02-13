@@ -26,7 +26,6 @@ use crate::network::event::NetworkCommand;
 use crate::protocol::gossip::{self, GossipPayload, InviteApproval};
 use crate::room::RoomKey;
 
-use super::code::hash_code;
 
 /// 인바운드 `InviteRequest` 수신 처리.
 ///
@@ -36,7 +35,7 @@ pub async fn on_invite_request(
     invite_manager: &mut InviteManager,
     from_peer: PeerId,
     room_id: [u8; 32],
-    code_creator_peer_id: Vec<u8>,
+    _code_creator_peer_id: Vec<u8>,
     app_tx: &AppEventTx,
     invite_number: u32,
     room_name: String,

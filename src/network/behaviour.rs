@@ -10,7 +10,7 @@ use libp2p::{
     StreamProtocol,
 };
 
-use super::codec::{AppCodec, AppRequest, AppResponse};
+use super::codec::AppCodec;
 
 /// 프로젝트의 모든 libp2p behaviour를 합성한 구조체.
 ///

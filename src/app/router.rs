@@ -1,3 +1,4 @@
+
 use crate::chat::{LogEntry, LogEntryKind};
 use crate::network::event::NetworkEvent;
 use crate::protocol::gossip::{self, GossipPayload};
@@ -12,7 +13,7 @@ pub async fn route_network_event(
     event: NetworkEvent,
     current_room_key: Option<&RoomKey>,
     app_tx: &AppEventTx,
-    net_tx: &NetworkCommandTx,
+    _net_tx: &NetworkCommandTx,
 ) {
     match event {
         // ── 피어 연결/해제 ────────────────────────────────────────────────────
@@ -65,14 +66,19 @@ pub async fn route_network_event(
                     app_tx.send(AppEvent::FeedEntry(LogEntry::file_event(&msg))).await.ok();
                 }
 
-                GossipPayload::BitfieldUpdate(_update) => {
-                    // Transfer 레이어에서 처리 (여기서는 무시)
+                GossipPayload::BitfieldUpdate(update) => {
+                    // BitfieldUpdate는 Transfer 레이어의 PeerBitfields 갱신에 사용.
+                    // 피어의 청크 보유 현황을 피드에 표시하지 않고 내부적으로 전달.
+                    // AppEvent에 BitfieldUpdate 이벤트가 없으므로 로그만 남김.
+                    // TODO: AppEvent::BitfieldUpdate 이벤트를 추가하면 transfer 루프와 연결 가능.
+                    let _ = update; // Transfer 이벤트 루프가 분리 구현되면 여기서 전달
                 }
 
-                GossipPayload::InviteApproval(_approval) => {
-                    // invite::handler::on_invite_approval_received에서 처리.
-                    // AppCore 레이어에서 InviteManager에 전달해야 함.
-                    // 여기서는 라우팅 불가 (InviteManager 없음) → 무시.
+                GossipPayload::InviteApproval(approval) => {
+                    // InviteApproval 브로드캐스트: 승인/거절 결과를 TUI에 전달.
+                    let accepted = approval.accepted;
+                    let by_peer = source.unwrap_or(libp2p::PeerId::random());
+                    app_tx.send(AppEvent::InviteDecision { accepted, by_peer }).await.ok();
                 }
             }
         }

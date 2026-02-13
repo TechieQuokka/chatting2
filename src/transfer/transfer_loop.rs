@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 
 use crate::crypto::{decrypt, encrypt, EncryptedData};
-use crate::network::codec::{AppRequest, AppResponse};
+use crate::network::codec::AppRequest;
 use crate::network::event::NetworkCommand;
 
 use super::bitfield::PeerBitfields;
