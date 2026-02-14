@@ -19,6 +19,12 @@ pub struct Config {
     // 파일
     pub download_path: String,
     pub max_concurrent_downloads: u32,
+    /// 업로드 속도 제한 (KB/s). 0 = 무제한.
+    #[serde(default)]
+    pub max_upload_kbps: u32,
+    /// 다운로드 속도 제한 (KB/s). 0 = 무제한.
+    #[serde(default)]
+    pub max_download_kbps: u32,
 
     // 채팅
     pub log_path: String,
@@ -41,6 +47,18 @@ pub enum Language {
     English,
 }
 
+/// `account::NetworkMode` → `network::NetworkMode` 변환.
+///
+/// `main.rs`에서 JSON 문자열 우회 없이 타입 안전하게 변환한다.
+impl From<&NetworkMode> for crate::network::config::NetworkMode {
+    fn from(m: &NetworkMode) -> Self {
+        match m {
+            NetworkMode::Internet => crate::network::config::NetworkMode::Internet,
+            NetworkMode::Intranet => crate::network::config::NetworkMode::Intranet,
+        }
+    }
+}
+
 impl Config {
     pub fn default_for(nickname: String, download_path: String, log_path: String) -> Self {
         Self {
@@ -50,6 +68,8 @@ impl Config {
             max_connections: 50,
             download_path,
             max_concurrent_downloads: 3,
+            max_upload_kbps: 0,
+            max_download_kbps: 0,
             log_path,
             language: Language::Korean,
         }
@@ -67,6 +87,14 @@ impl Config {
             .map_err(ConfigError::Json)?;
 
         Ok(config)
+    }
+
+    /// 이미 파생된 enc_key로 `config.enc`에 저장한다 (재로그인 불필요).
+    pub fn save_with_enc_key(&self, path: &Path, enc_key: &[u8; 32]) -> Result<(), ConfigError> {
+        let plaintext = serde_json::to_vec(self).map_err(ConfigError::Json)?;
+        save_enc(path, enc_key, &plaintext)
+            .map_err(|e| ConfigError::Crypto(e.to_string()))?;
+        Ok(())
     }
 
     /// `config.enc`에 설정을 저장한다.

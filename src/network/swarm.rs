@@ -17,7 +17,7 @@ use super::{
 };
 
 /// 프로토콜 식별자 (버전 포함).
-const PROTOCOL_VERSION: &str = "/chatting2/1.0.0";
+const PROTOCOL_VERSION: &str = "/filetalk/1.0.0";
 
 /// libp2p Swarm을 구성하고 반환한다.
 ///

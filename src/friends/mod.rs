@@ -75,6 +75,11 @@ pub struct FriendStore {
 }
 
 impl FriendStore {
+    /// 빈 친구 목록 생성 (파일이 없는 초기 상태).
+    pub fn new(path: PathBuf) -> Self {
+        Self { path, friends: Vec::new() }
+    }
+
     /// `friends.enc` 로드. 없으면 빈 목록.
     pub fn load(path: &Path, key: &[u8; 32]) -> Result<Self, FriendStoreError> {
         if !path.exists() {

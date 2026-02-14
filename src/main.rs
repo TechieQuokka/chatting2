@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crossterm::{
-    event::{self, Event},
+    event::{self, Event, KeyEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -27,6 +27,7 @@ use ratatui::backend::CrosstermBackend;
 use tokio::sync::{mpsc, oneshot};
 
 use account::session::{AccountPaths, delete_account, login, recover_stale_tmp, register};
+use account::PidLock;
 use app::channels::{AppCommand, AppCommandTx, AppEvent, AppEventRx};
 use app::core::AppCore;
 use friends::FriendStore;
@@ -37,6 +38,7 @@ use room::RoomStore;
 use transfer::{DownloadManager, SeedingManager};
 use tui::screen::*;
 use tui::{TuiAction, handle_key, render};
+use i18n::Lang;
 
 // ── 터미널 초기화 / 복구 ───────────────────────────────────────────────────────
 
@@ -89,7 +91,7 @@ async fn main() {
 
     let mut terminal = setup_terminal().expect("터미널 초기화 실패");
 
-    // ── Phase 1: 로그인 전 화면 ────────────────────────────────────────────────
+    // ── Phase 1: 로그인 전 화면 (언어는 항상 한국어) ──────────────────────────
     let pre_login_result = run_pre_login(&mut terminal, &paths, &data_root).await;
 
     let (user_id, identity, config, enc_key) = match pre_login_result {
@@ -101,27 +103,27 @@ async fn main() {
     };
 
     // ── Phase 2: 스웜 + AppCore 시작 ─────────────────────────────────────────
+    // 03-account.md: 로그인 후 PID lock 획득 — 정상 종료 시 RAII Drop으로 자동 삭제
+    let pid_lock = match PidLock::acquire(&paths.pid_file(&user_id)) {
+        Ok(lock) => lock,
+        Err(e) => {
+            cleanup_terminal(&mut terminal);
+            eprintln!("앱이 이미 실행 중입니다: {e}");
+            return;
+        }
+    };
+
     let net_config = build_network_config(&config);
 
     // 저장소 로드
     let rooms_path = paths.user_dir(&user_id).join("rooms.enc");
     let friends_path = paths.user_dir(&user_id).join("friends.enc");
-    let room_store = RoomStore::load(&rooms_path, &enc_key).unwrap_or_else(|_| {
-        RoomStore::load(&rooms_path, &enc_key).unwrap_or_else(|_| {
-            // 파일이 없거나 복호화 실패 시 빈 저장소
-            RoomStore::load(&paths.user_dir(&user_id).join("nonexistent_rooms.enc"), &enc_key)
-                .unwrap_or_else(|_| new_empty_room_store(rooms_path.clone(), &enc_key))
-        })
-    });
-    // FriendStore::load는 파일이 없으면 빈 목록을 반환하므로 직접 load 사용.
-    // 복호화 실패 시(잘못된 키) 빈 목록으로 fallback.
+    // RoomStore::load: 파일이 없으면 빈 저장소 반환, 복호화 실패 시 빈 저장소로 fallback
+    let room_store = RoomStore::load(&rooms_path, &enc_key)
+        .unwrap_or_else(|_| RoomStore::new(rooms_path.clone()));
+    // FriendStore::load: 파일이 없으면 빈 목록 반환, 복호화 실패 시 빈 저장소로 fallback
     let friend_store = FriendStore::load(&friends_path, &enc_key)
-        .unwrap_or_else(|_| {
-            // 파일이 없거나 복호화 실패 — 빈 저장소 생성을 위해 존재하지 않는 경로로 load
-            let empty_path = friends_path.with_extension("enc.missing");
-            FriendStore::load(&empty_path, &enc_key)
-                .unwrap_or_else(|_| panic!("FriendStore 초기화 실패"))
-        });
+        .unwrap_or_else(|_| FriendStore::new(friends_path.clone()));
     let download_manager = DownloadManager::new(config.max_concurrent_downloads as usize);
     let seeding_manager = SeedingManager::new();
 
@@ -149,6 +151,7 @@ async fn main() {
         identity,
         config,
         paths.clone(),
+        user_id,
         enc_key,
         room_store,
         friend_store,
@@ -166,6 +169,8 @@ async fn main() {
 
     // ── 종료 ──────────────────────────────────────────────────────────────────
     shutdown_tx.send(()).ok();
+    // pid_lock을 명시적으로 여기까지 보존하여 정상 종료 시 RAII Drop이 PID 파일을 삭제
+    drop(pid_lock);
     cleanup_terminal(&mut terminal);
 }
 
@@ -177,11 +182,11 @@ async fn run_pre_login(
     paths: &AccountPaths,
     data_root: &PathBuf,
 ) -> Option<(String, account::Identity, account::Config, [u8; 32])> {
-    let mut screen = Screen::Login(LoginState::default());
+    let mut screen = Screen::Welcome(WelcomeState::default());
 
     loop {
-        // 렌더링
-        terminal.draw(|f| render(f, &screen)).ok();
+        // 로그인 전은 항상 한국어
+        terminal.draw(|f| render(f, &screen, Lang::Korean)).ok();
 
         // 키 입력 대기 (100ms 타임아웃)
         if !event::poll(Duration::from_millis(100)).unwrap_or(false) {
@@ -189,12 +194,20 @@ async fn run_pre_login(
         }
 
         let ev = match event::read() {
-            Ok(Event::Key(k)) => k,
+            Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => k,
             _ => continue,
         };
 
         // 화면별 특수 처리 (screen 전환이 필요한 경우)
         match &screen {
+            Screen::Welcome(_) => {
+                let action = handle_key(&mut screen, ev);
+                match action {
+                    TuiAction::Quit => return None,
+                    TuiAction::Goto(new_screen) => { screen = new_screen; }
+                    _ => {}
+                }
+            }
             Screen::Login(_) => {
                 let action = handle_key(&mut screen, ev);
                 match action {
@@ -238,9 +251,10 @@ async fn run_pre_login(
                         std::fs::create_dir_all(data_root.join("users").join(&id).join("logs")).ok();
                         match register(paths, &id, &nickname, pw_bytes, &dl_path, &log_path) {
                             Ok(()) => {
+                                // 등록 완료 → 로그인 화면으로 (ID 미리 채움)
                                 screen = Screen::Login(LoginState {
                                     id_input: id,
-                                    error: Some("등록 완료! 로그인하세요.".into()),
+                                    error: Some("등록 완료! 비밀번호를 입력하고 Enter 로그인.".into()),
                                     ..Default::default()
                                 });
                             }
@@ -251,8 +265,9 @@ async fn run_pre_login(
                             }
                         }
                     }
+                    TuiAction::Goto(new_screen) => { screen = new_screen; }
                     TuiAction::Command(AppCommand::Shutdown) | TuiAction::Quit => {
-                        screen = Screen::Login(LoginState::default());
+                        screen = Screen::Welcome(WelcomeState::default());
                     }
                     _ => {}
                 }
@@ -260,27 +275,26 @@ async fn run_pre_login(
             Screen::DeleteAccount(_) => {
                 let action = handle_key(&mut screen, ev);
                 match action {
-                    TuiAction::DoDeleteAccount { id } => {
-                        // 비밀번호 재확인 없이 삭제 (현재 구조상 PW 없이 삭제 불가 — 설계 결함)
-                        // [논리적 결함 보고] DeleteAccountState에 password 필드 없음
-                        // 임시: 삭제 확인만 하고 PW는 빈 문자열 시도
-                        match delete_account(paths, &id, b"") {
+                    TuiAction::DoDeleteAccount { id, password } => {
+                        match delete_account(paths, &id, password.as_bytes()) {
                             Ok(()) => {
-                                screen = Screen::Login(LoginState {
-                                    error: Some("계정 삭제됨".into()),
-                                    ..Default::default()
+                                screen = Screen::Welcome(WelcomeState {
+                                    message: Some("계정이 삭제되었습니다.".into()),
                                 });
                             }
-                            Err(_) => {
-                                screen = Screen::Login(LoginState {
-                                    error: Some("계정 삭제 실패 (비밀번호 확인 필요)".into()),
-                                    ..Default::default()
-                                });
+                            Err(e) => {
+                                if let Screen::DeleteAccount(s) = &mut screen {
+                                    s.error = Some(format!("삭제 실패: {e}"));
+                                    s.pw_input.clear();
+                                }
                             }
                         }
                     }
+                    TuiAction::Goto(new_screen) => {
+                        screen = new_screen;
+                    }
                     TuiAction::Command(AppCommand::Shutdown) | TuiAction::Quit => {
-                        screen = Screen::Login(LoginState::default());
+                        screen = Screen::Welcome(WelcomeState::default());
                     }
                     _ => {}
                 }
@@ -304,13 +318,18 @@ async fn run_tui_loop(
         nickname: nickname.to_string(),
         ..Default::default()
     });
+    let mut lang = Lang::Korean;
 
     loop {
         // 렌더링
-        terminal.draw(|f| render(f, &screen)).ok();
+        terminal.draw(|f| render(f, &screen, lang)).ok();
 
         // AppEvent 비동기 수신 (non-blocking)
         while let Ok(event) = app_rx.try_recv() {
+            // ConfigSnapshot에서 언어 설정 추출
+            if let AppEvent::ConfigSnapshot { ref language, .. } = event {
+                lang = if language == "English" { Lang::English } else { Lang::Korean };
+            }
             handle_app_event(&mut screen, event);
         }
 
@@ -321,7 +340,7 @@ async fn run_tui_loop(
         }
 
         let ev = match event::read() {
-            Ok(Event::Key(k)) => k,
+            Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => k,
             _ => continue,
         };
 
@@ -418,6 +437,7 @@ fn handle_app_event(screen: &mut Screen, event: AppEvent) {
                         room_id,
                         name,
                         peer_status: match peer_count {
+                            Some(0) => PeerStatus::Offline,
                             Some(n) => PeerStatus::Online(n),
                             None => PeerStatus::Checking,
                         },
@@ -480,14 +500,82 @@ fn handle_app_event(screen: &mut Screen, event: AppEvent) {
             add_system_feed(screen, msg);
         }
 
-        AppEvent::DownloadProgress { file_hash: _, completed_chunks, total_chunks, status } => {
-            // 활성 다운로드 요약 갱신은 실제로 DownloadManager 상태를 직접 읽어야 함.
-            // 여기서는 진행률 계산만 반영.
-            let _ = (completed_chunks, total_chunks, status);
+        AppEvent::DownloadProgress { file_hash, completed_chunks, total_chunks, status } => {
+            // 채팅 화면 상단 활성 다운로드 요약 바 갱신 (12-tui.md)
+            if let Screen::Chat(s) = screen {
+                use crate::tui::screen::DownloadSummary;
+                let pct = if total_chunks > 0 {
+                    completed_chunks as f32 / total_chunks as f32 * 100.0
+                } else {
+                    0.0
+                };
+                // 기존 항목 갱신 또는 새 항목 추가 (최대 3개 표시)
+                if let Some(entry) = s.active_downloads.iter_mut().find(|d| {
+                    // file_hash로 매핑할 이름을 찾기 어려우므로 상태로 찾음
+                    d.pct < 100.0 && matches!(d.status, crate::transfer::DownloadStatus::Active)
+                }) {
+                    entry.pct = pct;
+                    entry.status = status;
+                } else if s.active_downloads.len() < 3 {
+                    s.active_downloads.push(DownloadSummary {
+                        file_name: format!("{}", hex_short(&file_hash)),
+                        pct,
+                        bps: 0,
+                        status,
+                    });
+                }
+            }
         }
 
         AppEvent::DownloadComplete { file_name, .. } => {
             add_system_feed(screen, format!("[✓] '{}' 다운로드 완료", file_name));
+        }
+
+        AppEvent::PeerList { peers } => {
+            if peers.is_empty() {
+                add_system_feed(screen, "접속 피어: 0명 (mDNS 탐색된 로컬 피어 없음)".into());
+            } else {
+                add_system_feed(screen, format!("접속 피어: {}명", peers.len()));
+                for (id, addr) in &peers {
+                    let id_str = id.to_string();
+                    let short = &id_str[id_str.len().saturating_sub(12)..];
+                    add_system_feed(screen, format!("  ...{} ({})", short, addr));
+                }
+            }
+        }
+
+        AppEvent::FileRemoved { .. } => {
+            // router.rs에서 이미 FeedEntry로 "파일 공유 철회됨"을 표시함
+        }
+
+        AppEvent::InviteDecision { accepted, by_peer } => {
+            let id_str = by_peer.to_string();
+            let short = &id_str[id_str.len().saturating_sub(12)..];
+            if accepted {
+                add_system_feed(screen, format!("[초대] ...{} 님이 초대를 수락했습니다.", short));
+            } else {
+                add_system_feed(screen, format!("[초대] ...{} 님이 초대를 거절했습니다.", short));
+            }
+        }
+
+        AppEvent::ConfigSnapshot {
+            user_id, nickname, network_mode, port, max_connections,
+            download_path, max_concurrent_dl, max_upload_kbps, max_download_kbps,
+            log_path, language,
+        } => {
+            if let Screen::Settings(s) = screen {
+                s.config.user_id = user_id;
+                s.config.nickname = nickname;
+                s.config.network_mode = network_mode;
+                s.config.port = port;
+                s.config.max_connections = max_connections;
+                s.config.download_path = download_path;
+                s.config.max_concurrent_dl = max_concurrent_dl;
+                s.config.max_upload_kbps = max_upload_kbps;
+                s.config.max_download_kbps = max_download_kbps;
+                s.config.log_path = log_path;
+                s.config.language = language;
+            }
         }
 
         _ => {} // LoginSuccess/Failed 등 로그인 전 이벤트 무시
@@ -507,38 +595,19 @@ fn add_system_feed(screen: &mut Screen, msg: String) {
 // ── NetworkConfig 변환 ────────────────────────────────────────────────────────
 
 fn build_network_config(config: &account::Config) -> NetworkConfig {
-    // account::Config의 NetworkMode와 network::NetworkConfig 간 변환.
-    // account::config::NetworkMode는 private이므로 문자열 직렬화/역직렬화로 구분.
-    // [논리적 결함 보고] account::Config의 NetworkMode를 pub으로 노출하거나
-    //   network::NetworkMode로 통합하는 것이 더 명확함.
-    let mode_str = serde_json::to_string(&config.network_mode)
-        .unwrap_or_else(|_| "\"internet\"".to_string());
-    if mode_str.contains("internet") {
-        let mut nc = NetworkConfig::internet_default(config.port);
-        nc.max_connections = config.max_connections;
-        nc
-    } else {
-        let mut nc = NetworkConfig::intranet_default(config.port);
-        nc.max_connections = config.max_connections;
-        nc
-    }
+    // account::NetworkMode → network::NetworkMode 타입 안전 변환 (From 구현 사용)
+    use network::config::NetworkMode as NetMode;
+    let net_mode = NetMode::from(&config.network_mode);
+    let mut nc = match net_mode {
+        NetMode::Internet => NetworkConfig::internet_default(config.port),
+        NetMode::Intranet => NetworkConfig::intranet_default(config.port),
+    };
+    nc.max_connections = config.max_connections;
+    nc
 }
 
 // ── 헬퍼 ──────────────────────────────────────────────────────────────────────
 
-fn new_empty_room_store(path: PathBuf, _key: &[u8; 32]) -> RoomStore {
-    // 파일이 없을 때 빈 RoomStore 생성.
-    // RoomStore::load가 존재하지 않는 경로에 대해 빈 저장소를 반환하므로
-    // 임시 경로로 load 후 실제 경로로 재설정할 수 없어
-    // 직접 생성 가능한 공개 생성자가 필요하지만 현재 없음.
-    // 임시 해결: 빈 파일을 먼저 생성하고 load.
-    // [논리적 결함 보고] RoomStore에 new(path) 생성자 없음 — load만 공개됨
-    let _ = std::fs::File::create(&path); // 빈 파일 생성 (load 실패 방지)
-    RoomStore::load(&path, _key).unwrap_or_else(|_| {
-        // 최후 수단: 패닉 대신 프로세스 종료
-        panic!("rooms.enc 생성 실패")
-    })
-}
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
     if s.len() % 2 != 0 { return None; }
@@ -546,6 +615,10 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
         .collect()
+}
+
+fn hex_short(hash: &[u8; 32]) -> String {
+    hash.iter().take(4).map(|b| format!("{b:02x}")).collect()
 }
 
 fn format_size(bytes: u64) -> String {

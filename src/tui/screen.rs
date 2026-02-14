@@ -8,6 +8,8 @@ use crate::transfer::DownloadStatus;
 /// TUI 현재 화면 상태.
 #[derive(Debug)]
 pub enum Screen {
+    /// 시작 화면 — 메뉴만 표시. 로그인 전 진입점.
+    Welcome(WelcomeState),
     Login(LoginState),
     Register(RegisterState),
     DeleteAccount(DeleteAccountState),
@@ -19,6 +21,15 @@ pub enum Screen {
     Settings(SettingsState),
     FileSelect(FileSelectState),
     Chat(ChatState),
+}
+
+// ── 시작 화면 ────────────────────────────────────────────────────────────────
+
+/// 시작 화면 상태. 메뉴([1] 로그인, [2] 계정 등록, [3] 계정 삭제, [Q] 종료)만 표시.
+#[derive(Debug, Default)]
+pub struct WelcomeState {
+    /// 등록 완료, 계정 삭제 등 이전 동작의 안내 메시지.
+    pub message: Option<String>,
 }
 
 // ── 로그인 화면 ───────────────────────────────────────────────────────────────
@@ -61,11 +72,26 @@ pub enum RegisterField {
 
 // ── 계정 삭제 화면 ────────────────────────────────────────────────────────────
 
+/// 계정 삭제 화면 상태.
+///
+/// 로그인 화면에서 ID를 미리 채울 수 있으며, PW는 반드시 이 화면에서 직접 입력한다.
+/// 03-account.md: "ID/PW 입력 후 [3] 계정 삭제 선택 → PW 검증 → 확인 후 진행"
 #[derive(Debug, Default)]
 pub struct DeleteAccountState {
-    pub id: String,
-    pub confirmed: bool,
+    /// 삭제할 계정 ID (로그인 화면에서 전달받거나 직접 입력).
+    pub id_input: String,
+    /// 삭제 확인용 비밀번호 (반드시 이 화면에서 직접 입력).
+    pub pw_input: String,
+    /// 현재 포커스 필드.
+    pub focused: DeleteField,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub enum DeleteField {
+    #[default]
+    Id,
+    Pw,
 }
 
 // ── 메인 메뉴 ─────────────────────────────────────────────────────────────────
@@ -175,6 +201,22 @@ pub struct FriendDisplay {
 
 // ── 설정 화면 ─────────────────────────────────────────────────────────────────
 
+/// 현재 설정값 (ConfigSnapshot으로 채워짐).
+#[derive(Debug, Default, Clone)]
+pub struct ConfigValues {
+    pub user_id: String,
+    pub nickname: String,
+    pub network_mode: String,
+    pub port: String,
+    pub max_connections: String,
+    pub download_path: String,
+    pub max_concurrent_dl: String,
+    pub max_upload_kbps: String,
+    pub max_download_kbps: String,
+    pub log_path: String,
+    pub language: String,
+}
+
 #[derive(Debug, Default)]
 pub struct SettingsState {
     pub category: SettingsCategory,
@@ -182,6 +224,12 @@ pub struct SettingsState {
     pub editing: bool,
     pub edit_input: String,
     pub error: Option<String>,
+    /// 현재 설정값 (AppCore로부터 스냅샷).
+    pub config: ConfigValues,
+    /// 비밀번호 변경 2단계 입력: 0=미진행, 1=현재PW 입력 중, 2=새PW 입력 중.
+    pub pw_change_step: u8,
+    /// 비밀번호 변경 1단계에서 입력한 현재 비밀번호 (임시 보관).
+    pub pw_current_temp: String,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]

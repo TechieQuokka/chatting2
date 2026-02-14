@@ -92,7 +92,7 @@ impl AppBehaviour {
         let request_response = request_response::Behaviour::with_codec(
             AppCodec,
             [(
-                StreamProtocol::new("/chatting2/rpc/1.0.0"),
+                StreamProtocol::new("/filetalk/rpc/1.0.0"),
                 ProtocolSupport::Full,
             )],
             request_response::Config::default(),

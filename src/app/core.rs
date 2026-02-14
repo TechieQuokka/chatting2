@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use libp2p::gossipsub::IdentTopic;
+use libp2p::request_response;
 use libp2p::{Multiaddr, PeerId};
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
@@ -8,7 +9,8 @@ use tokio::time::{interval, Duration};
 use crate::account::{AccountPaths, Config, Identity};
 use crate::chat::log::{LogEntry, LogEntryKind};
 use crate::friends::FriendStore;
-use crate::network::codec::AppRequest;
+use crate::invite::session::InviteManager;
+use crate::network::codec::{AppRequest, AppResponse};
 use crate::network::event::{NetworkCommand, NetworkEvent};
 use crate::protocol::gossip::{self, GossipPayload};
 use crate::room::{RoomKey, RoomLifetime, RoomStore};
@@ -38,6 +40,8 @@ struct ActiveRoom {
     room_id: [u8; 32],
     key: RoomKey,
     topic: IdentTopic,
+    /// 방별 채팅 로그 핸들러 (디스크 영속).
+    chat_log: crate::chat::log::ChatLog,
 }
 
 impl Drop for ActiveRoom {
@@ -56,6 +60,7 @@ pub struct AppCore {
     pub identity: Identity,
     pub config: Config,
     pub paths: AccountPaths,
+    pub user_id: String,
     /// 로그인 시 Argon2id로 파생된 암호화 키 (rooms.enc / friends.enc 용).
     enc_key: [u8; 32],
 
@@ -71,6 +76,13 @@ pub struct AppCore {
     // ── mDNS 피어 목록 (인트라넷 모드 초대용) ────────────────────────────────
     mdns_peers: HashMap<PeerId, Multiaddr>,
 
+    // ── 초대 관리 ─────────────────────────────────────────────────────────────
+    invite_manager: InviteManager,
+    /// 수신된 InviteRequest의 응답 채널 (초대 번호 → (발신 PeerId, ResponseChannel)).
+    pending_invite_channels: HashMap<u32, (PeerId, request_response::ResponseChannel<AppResponse>)>,
+    /// 다음 초대 번호 (단조 증가).
+    invite_counter: u32,
+
     // ── 채널 ─────────────────────────────────────────────────────────────────
     cmd_rx: AppCommandRx,
     app_tx: AppEventTx,
@@ -83,6 +95,7 @@ impl AppCore {
         identity: Identity,
         config: Config,
         paths: AccountPaths,
+        user_id: String,
         enc_key: [u8; 32],
         room_store: RoomStore,
         friend_store: FriendStore,
@@ -97,6 +110,7 @@ impl AppCore {
             identity,
             config,
             paths,
+            user_id,
             enc_key,
             room_store,
             friend_store,
@@ -104,6 +118,9 @@ impl AppCore {
             seeding_manager,
             active_room: None,
             mdns_peers: HashMap::new(),
+            invite_manager: InviteManager::default(),
+            pending_invite_channels: HashMap::new(),
+            invite_counter: 0,
             cmd_rx,
             app_tx,
             net_tx,
@@ -119,6 +136,10 @@ impl AppCore {
         let mut republish_tick = interval(Duration::from_secs(DHT_REPUBLISH_SECS));
         republish_tick.tick().await; // 첫 tick 즉시 소비 (시작 직후 재등록 방지)
 
+        // 05-room.md / D-07: 채팅 화면 입장 중 1분 간격 만료 체크 타이머.
+        let mut expiry_check_tick = interval(Duration::from_secs(60));
+        expiry_check_tick.tick().await; // 첫 tick 즉시 소비
+
         loop {
             tokio::select! {
                 // 앱 커맨드 처리 (TUI → App)
@@ -131,15 +152,30 @@ impl AppCore {
 
                 // 네트워크 이벤트 처리 (Network → App)
                 Some(event) = self.net_rx.recv() => {
-                    // mDNS 이벤트 먼저 처리 (AppCore 내부 상태 갱신)
-                    self.preprocess_network_event(&event).await;
-                    let room_key = self.active_room.as_ref().map(|r| &r.key);
-                    route_network_event(event, room_key, &self.app_tx, &self.net_tx).await;
+                    // InboundRequest는 ResponseChannel 소유권이 필요하므로 분리 처리
+                    if let NetworkEvent::InboundRequest { .. } = event {
+                        self.handle_inbound_request(event).await;
+                    } else {
+                        // mDNS 이벤트 먼저 처리 (AppCore 내부 상태 갱신)
+                        self.preprocess_network_event(&event).await;
+                        let room_key = self.active_room.as_ref().map(|r| &r.key);
+                        let chat_log = self.active_room.as_ref().map(|r| &r.chat_log);
+                        route_network_event(event, room_key, chat_log, &self.app_tx, &self.net_tx).await;
+                    }
                 }
 
                 // DHT Provider Records 주기적 재등록
                 _ = republish_tick.tick() => {
                     self.republish_dht().await;
+                }
+
+                // 채팅 화면 입장 중 1분 간격 방 만료 체크 (D-07)
+                _ = expiry_check_tick.tick() => {
+                    if let Some(room) = &self.active_room {
+                        if self.room_store.is_expired(&room.room_id) {
+                            self.app_tx.send(AppEvent::RoomExpired).await.ok();
+                        }
+                    }
                 }
 
                 // 종료 신호 수신
@@ -196,6 +232,13 @@ impl AppCore {
                 self.start_download(file_hash, file_name, chunk_count).await;
             }
 
+            // 선택적 다운로드에서 여러 파일 동시 다운로드 (12-tui.md: 파일 선택 화면)
+            AppCommand::StartDownloads { files } => {
+                for (file_hash, file_name, chunk_count) in files {
+                    self.start_download(file_hash, file_name, chunk_count).await;
+                }
+            }
+
             AppCommand::PauseDownload { number } => {
                 self.download_manager.pause(number);
             }
@@ -234,14 +277,20 @@ impl AppCore {
 
             // ── 설정 ───────────────────────────────────────────────────────
             AppCommand::ChangeNickname { new_nickname } => {
+                // 03-account.md: 닉네임 변경은 config.enc와 users.json 모두 갱신
                 self.config.nickname = new_nickname.clone();
+                let config_path = self.paths.config_enc(&self.user_id);
                 let enc_key = self.account_enc_key();
-                let store = crate::account::UserStore::load(&self.paths.users_json())
-                    .ok();
-                if let Some(_s) = store {
-                    // users.json에서 현재 사용자 ID 찾기 (identity로 매핑)
-                    // 단순화: config를 재저장하는 것으로 닉네임 반영
-                    let _ = enc_key;
+                match self.config.save_with_enc_key(&config_path, &enc_key) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        self.app_tx.send(AppEvent::Error(format!("닉네임 저장 실패: {e}"))).await.ok();
+                        return false;
+                    }
+                }
+                // users.json의 nickname 필드도 동기화 (로그인 화면 목록 표시용)
+                if let Ok(mut store) = crate::account::UserStore::load(&self.paths.users_json()) {
+                    let _ = store.update_nickname(&self.user_id, new_nickname.clone());
                 }
                 self.app_tx.send(AppEvent::Notice(format!("닉네임 변경됨: {new_nickname}"))).await.ok();
             }
@@ -262,19 +311,40 @@ impl AppCore {
                 self.app_tx.send(AppEvent::Notice("친구 삭제됨".into())).await.ok();
             }
 
+            AppCommand::DeleteRoom { room_id } => {
+                match self.room_store.remove(&room_id) {
+                    Ok(()) => {
+                        let enc_key = self.account_enc_key();
+                        self.room_store.save(&enc_key).ok();
+                        self.app_tx.send(AppEvent::Notice("방이 삭제됐습니다.".into())).await.ok();
+                    }
+                    Err(e) => {
+                        self.app_tx.send(AppEvent::Error(format!("방 삭제 실패: {e}"))).await.ok();
+                    }
+                }
+            }
+
             // ── 목록 조회 ─────────────────────────────────────────────────
             AppCommand::ListRooms => {
-                let _now_ms = RoomStore::now_ms();
+                // 05-room.md: 방 목록 진입 시 만료 방 자동 정리
+                let removed = self.room_store.remove_expired();
+                if removed > 0 {
+                    let enc_key = self.account_enc_key();
+                    self.room_store.save(&enc_key).ok();
+                }
+                // 로컬 저장소 기반 목록 — 실시간 피어 수 미확인이므로 Some(0) → Offline
                 let rooms: Vec<_> = self.room_store.all().iter().map(|r| {
-                    (r.room_id, r.name.clone(), None)
+                    (r.room_id, r.name.clone(), Some(0u32))
                 }).collect();
                 self.app_tx.send(AppEvent::RoomList { rooms }).await.ok();
             }
 
             AppCommand::ListPeers => {
-                // 현재 GossipSub 구독 피어 목록은 Network에서 관리
-                // 간단히 빈 목록 전송
-                self.app_tx.send(AppEvent::PeerList { peers: vec![] }).await.ok();
+                let peers: Vec<(PeerId, String)> = self.mdns_peers
+                    .iter()
+                    .map(|(id, addr)| (*id, addr.to_string()))
+                    .collect();
+                self.app_tx.send(AppEvent::PeerList { peers }).await.ok();
             }
 
             // ── 초대 코드 ─────────────────────────────────────────────────
@@ -287,9 +357,230 @@ impl AppCore {
             }
 
             AppCommand::AcceptInvite { number } => {
-                // InviteManager 없이 단순 알림
-                let _ = number;
-                self.app_tx.send(AppEvent::Notice("초대 수락 처리됨".into())).await.ok();
+                let target_num = if let Some(n) = number {
+                    n
+                } else {
+                    // 번호 미지정 시 가장 오래된 대기 초대
+                    match self.pending_invite_channels.keys().copied().next() {
+                        Some(n) => n,
+                        None => {
+                            self.app_tx.send(AppEvent::Error("처리할 초대 요청이 없습니다.".into())).await.ok();
+                            return false;
+                        }
+                    }
+                };
+                if let Some((peer, channel)) = self.pending_invite_channels.remove(&target_num) {
+                    let Some(room) = &self.active_room else {
+                        self.app_tx.send(AppEvent::Error("방에 입장한 상태에서만 초대를 수락할 수 있습니다.".into())).await.ok();
+                        return false;
+                    };
+                    let room_key = room.key.clone();
+                    let room_topic = room.topic.clone();
+                    let my_peer_id_bytes = self.identity.keypair().public().to_peer_id().to_bytes();
+                    crate::invite::handler::approve(
+                        &mut self.invite_manager,
+                        peer,
+                        &room_key,
+                        &room_topic,
+                        my_peer_id_bytes,
+                        [0u8; 32],
+                        channel,
+                        &self.net_tx,
+                    ).await;
+                    self.app_tx.send(AppEvent::Notice("초대를 수락했습니다.".into())).await.ok();
+                } else {
+                    self.app_tx.send(AppEvent::Error("해당 번호의 초대 요청을 찾을 수 없습니다.".into())).await.ok();
+                }
+            }
+
+            AppCommand::DeclineInvite { number } => {
+                let target_num = if let Some(n) = number {
+                    n
+                } else {
+                    match self.pending_invite_channels.keys().copied().next() {
+                        Some(n) => n,
+                        None => {
+                            self.app_tx.send(AppEvent::Error("처리할 초대 요청이 없습니다.".into())).await.ok();
+                            return false;
+                        }
+                    }
+                };
+                if let Some((peer, channel)) = self.pending_invite_channels.remove(&target_num) {
+                    let Some(room) = &self.active_room else {
+                        self.app_tx.send(AppEvent::Error("방에 입장한 상태에서만 초대를 거절할 수 있습니다.".into())).await.ok();
+                        return false;
+                    };
+                    let room_key = room.key.clone();
+                    let room_topic = room.topic.clone();
+                    let my_peer_id_bytes = self.identity.keypair().public().to_peer_id().to_bytes();
+                    crate::invite::handler::reject(
+                        &mut self.invite_manager,
+                        peer,
+                        crate::network::codec::RejectReason::Declined,
+                        &room_key,
+                        &room_topic,
+                        my_peer_id_bytes,
+                        [0u8; 32],
+                        channel,
+                        &self.net_tx,
+                    ).await;
+                    self.app_tx.send(AppEvent::Notice("초대를 거절했습니다.".into())).await.ok();
+                } else {
+                    self.app_tx.send(AppEvent::Error("해당 번호의 초대 요청을 찾을 수 없습니다.".into())).await.ok();
+                }
+            }
+
+            // ── 설정 ───────────────────────────────────────────────────────
+            AppCommand::EnterSettings => {
+                self.send_config_snapshot().await;
+            }
+
+            AppCommand::UpdateConfigField { field, value } => {
+                match field.as_str() {
+                    "nickname" => {
+                        self.config.nickname = value.clone();
+                    }
+                    "network_mode" => {
+                        self.config.network_mode = if value.contains("인트라") {
+                            crate::account::NetworkMode::Intranet
+                        } else {
+                            crate::account::NetworkMode::Internet
+                        };
+                    }
+                    "port" => {
+                        if let Ok(p) = value.trim().parse::<u16>() {
+                            self.config.port = p;
+                        } else {
+                            self.app_tx.send(AppEvent::Error("포트는 0–65535 숫자여야 합니다.".into())).await.ok();
+                            return false;
+                        }
+                    }
+                    "max_connections" => {
+                        if let Ok(n) = value.trim().parse::<u32>() {
+                            self.config.max_connections = n;
+                        } else {
+                            self.app_tx.send(AppEvent::Error("숫자를 입력하세요.".into())).await.ok();
+                            return false;
+                        }
+                    }
+                    "download_path" => {
+                        self.config.download_path = value.clone();
+                    }
+                    "max_concurrent_dl" => {
+                        if let Ok(n) = value.trim().parse::<u32>() {
+                            self.config.max_concurrent_downloads = n;
+                            self.download_manager.max_concurrent = n as usize;
+                        } else {
+                            self.app_tx.send(AppEvent::Error("숫자를 입력하세요.".into())).await.ok();
+                            return false;
+                        }
+                    }
+                    "max_upload_kbps" => {
+                        if let Ok(n) = value.trim().parse::<u32>() {
+                            self.config.max_upload_kbps = n;
+                            self.seeding_manager.set_upload_limit(n as u64 * 1024);
+                        } else {
+                            self.app_tx.send(AppEvent::Error("숫자를 입력하세요 (0=무제한).".into())).await.ok();
+                            return false;
+                        }
+                    }
+                    "max_download_kbps" => {
+                        if let Ok(n) = value.trim().parse::<u32>() {
+                            self.config.max_download_kbps = n;
+                        } else {
+                            self.app_tx.send(AppEvent::Error("숫자를 입력하세요 (0=무제한).".into())).await.ok();
+                            return false;
+                        }
+                    }
+                    "log_path" => {
+                        self.config.log_path = value.clone();
+                    }
+                    "language" => {
+                        self.config.language = if value.contains("English") {
+                            crate::account::Language::English
+                        } else {
+                            crate::account::Language::Korean
+                        };
+                    }
+                    _ => {}
+                }
+
+                // config.enc 저장
+                let config_path = self.paths.config_enc(&self.user_id);
+                let enc_key = self.account_enc_key();
+                match self.config.save_with_enc_key(&config_path, &enc_key) {
+                    Ok(()) => {
+                        self.send_config_snapshot().await;
+                    }
+                    Err(e) => {
+                        self.app_tx.send(AppEvent::Error(format!("설정 저장 실패: {e}"))).await.ok();
+                    }
+                }
+            }
+
+            // ── 목록 조회 ──────────────────────────────────────────────────
+            AppCommand::ListFiles => {
+                if self.seeding_manager.entries.is_empty() {
+                    self.app_tx.send(AppEvent::Notice("공유 중인 파일 없음".into())).await.ok();
+                } else {
+                    self.app_tx.send(AppEvent::Notice(format!(
+                        "공유 중인 파일 ({}개):", self.seeding_manager.entries.len()
+                    ))).await.ok();
+                    for (i, e) in self.seeding_manager.entries.iter().enumerate() {
+                        let status = match e.status {
+                            crate::transfer::seeding::SeedStatus::Active => "시딩",
+                            crate::transfer::seeding::SeedStatus::AutoPaused => "자동정지",
+                            crate::transfer::seeding::SeedStatus::ManualPaused => "정지",
+                        };
+                        self.app_tx.send(AppEvent::Notice(format!(
+                            "  [{}] {} ({})", i + 1, e.file_name, status
+                        ))).await.ok();
+                    }
+                }
+            }
+
+            AppCommand::ListDownloads => {
+                if self.download_manager.entries.is_empty() {
+                    self.app_tx.send(AppEvent::Notice("다운로드 목록 없음".into())).await.ok();
+                } else {
+                    self.app_tx.send(AppEvent::Notice(format!(
+                        "다운로드 목록 ({}개):", self.download_manager.entries.len()
+                    ))).await.ok();
+                    for (i, e) in self.download_manager.entries.iter().enumerate() {
+                        let status = match e.status {
+                            crate::transfer::DownloadStatus::Active => "다운로드중",
+                            crate::transfer::DownloadStatus::AutoPaused => "자동정지",
+                            crate::transfer::DownloadStatus::ManualPaused => "정지",
+                            crate::transfer::DownloadStatus::Waiting => "대기중",
+                            crate::transfer::DownloadStatus::Completed => "완료",
+                            crate::transfer::DownloadStatus::Cancelled => "취소됨",
+                        };
+                        self.app_tx.send(AppEvent::Notice(format!(
+                            "  [{}] {} {:.0}% ({})", i + 1, e.file_name, e.progress_pct(), status
+                        ))).await.ok();
+                    }
+                }
+            }
+
+            AppCommand::ListSeeds => {
+                if self.seeding_manager.entries.is_empty() {
+                    self.app_tx.send(AppEvent::Notice("시딩 목록 없음".into())).await.ok();
+                } else {
+                    self.app_tx.send(AppEvent::Notice(format!(
+                        "시딩 목록 ({}개):", self.seeding_manager.entries.len()
+                    ))).await.ok();
+                    for (i, e) in self.seeding_manager.entries.iter().enumerate() {
+                        let status = match e.status {
+                            crate::transfer::seeding::SeedStatus::Active => "시딩중",
+                            crate::transfer::seeding::SeedStatus::AutoPaused => "자동정지",
+                            crate::transfer::seeding::SeedStatus::ManualPaused => "수동정지",
+                        };
+                        self.app_tx.send(AppEvent::Notice(format!(
+                            "  [{}] {} ({}) — {}", i + 1, e.file_name, status,
+                            e.local_path.display()
+                        ))).await.ok();
+                    }
+                }
             }
 
             // ── 시스템 ─────────────────────────────────────────────────────
@@ -300,11 +591,20 @@ impl AppCore {
             // Login/Register/DeleteAccount는 main.rs에서 AppCore 시작 전 처리
             AppCommand::Login { .. } | AppCommand::Register { .. } | AppCommand::DeleteAccount { .. } => {}
 
-            AppCommand::ChangePassword { .. } => {
-                // 비밀번호 변경은 main.rs 레벨에서 처리 필요 (salt 접근 필요)
-                self.app_tx.send(AppEvent::Error(
-                    "비밀번호 변경은 설정 화면에서 처리됩니다.".into()
-                )).await.ok();
+            AppCommand::ChangePassword { current, new_pw } => {
+                match crate::account::session::change_password(
+                    &self.paths,
+                    &self.user_id,
+                    current.as_bytes(),
+                    new_pw.as_bytes(),
+                ) {
+                    Ok(()) => {
+                        self.app_tx.send(AppEvent::Notice("비밀번호가 변경되었습니다.".into())).await.ok();
+                    }
+                    Err(e) => {
+                        self.app_tx.send(AppEvent::Error(format!("비밀번호 변경 실패: {e}"))).await.ok();
+                    }
+                }
             }
         }
 
@@ -359,12 +659,41 @@ impl AppCore {
         // 다운로드 재개 (자동 일시정지 상태만)
         self.download_manager.auto_resume_on_rejoin();
 
-        self.active_room = Some(ActiveRoom { room_id, key, topic });
+        // 채팅 로그 핸들러 초기화 및 이전 내역 로드
+        let log_dir = std::path::Path::new(&self.config.log_path);
+        let chat_log = crate::chat::log::ChatLog::new(log_dir, &room_id)
+            .unwrap_or_else(|_| {
+                // 설정 경로 실패 시 임시 디렉토리로 fallback
+                let tmp = std::env::temp_dir().join("chatapp_logs");
+                crate::chat::log::ChatLog::new(&tmp, &room_id)
+                    .expect("임시 로그 디렉토리 생성 실패")
+            });
+        let history = chat_log.load_all().unwrap_or_default();
 
+        self.active_room = Some(ActiveRoom { room_id, key, topic, chat_log });
+
+        // 방 입장 이벤트 먼저 전송 — TUI가 ChatState를 생성한 뒤 피드에 내역을 채움
         self.app_tx
             .send(AppEvent::JoinedRoom { room_id, name: room_name })
             .await
             .ok();
+
+        // 이전 채팅 내역 재생 (최대 500개, P2P 특성상 개인 내역만 표시)
+        const MAX_HISTORY: usize = 500;
+        let start = history.len().saturating_sub(MAX_HISTORY);
+        let history_slice = &history[start..];
+        for entry in history_slice.iter() {
+            self.app_tx.send(AppEvent::FeedEntry(entry.clone())).await.ok();
+        }
+        // 이전 내역과 현재 세션 구분선
+        if !history_slice.is_empty() {
+            self.app_tx
+                .send(AppEvent::FeedEntry(
+                    crate::chat::log::LogEntry::system("─── 여기서 입장 ─────────────────────────────"),
+                ))
+                .await
+                .ok();
+        }
     }
 
     async fn create_room(&mut self, name: String, lifetime: RoomLifetime) {
@@ -442,7 +771,7 @@ impl AppCore {
                     .await
                     .ok();
 
-                // 자신의 메시지도 피드에 추가
+                // 자신의 메시지도 피드에 추가하고 로그에 저장
                 let entry = LogEntry {
                     timestamp_ms: RoomStore::now_ms(),
                     kind: LogEntryKind::Chat {
@@ -451,6 +780,9 @@ impl AppCore {
                         text,
                     },
                 };
+                if let Some(room) = &self.active_room {
+                    room.chat_log.append(&entry).ok();
+                }
                 self.app_tx.send(AppEvent::FeedEntry(entry)).await.ok();
             }
             Err(e) => {
@@ -589,6 +921,32 @@ impl AppCore {
 
     // ── 헬퍼 ──────────────────────────────────────────────────────────────────
 
+    /// 현재 Config를 ConfigSnapshot 이벤트로 TUI에 전송한다.
+    async fn send_config_snapshot(&self) {
+        use crate::account::{Language, NetworkMode};
+        let network_mode = match self.config.network_mode {
+            NetworkMode::Internet => "인터넷".to_string(),
+            NetworkMode::Intranet => "인트라넷".to_string(),
+        };
+        let language = match self.config.language {
+            Language::Korean => "Korean".to_string(),
+            Language::English => "English".to_string(),
+        };
+        self.app_tx.send(AppEvent::ConfigSnapshot {
+            user_id: self.user_id.clone(),
+            nickname: self.config.nickname.clone(),
+            network_mode,
+            port: self.config.port.to_string(),
+            max_connections: self.config.max_connections.to_string(),
+            download_path: self.config.download_path.clone(),
+            max_concurrent_dl: self.config.max_concurrent_downloads.to_string(),
+            max_upload_kbps: self.config.max_upload_kbps.to_string(),
+            max_download_kbps: self.config.max_download_kbps.to_string(),
+            log_path: self.config.log_path.clone(),
+            language,
+        }).await.ok();
+    }
+
     /// 계정 암호화 키 (rooms.enc / friends.enc 암호화에 사용).
     ///
     /// 로그인 시 Argon2id로 파생된 키를 사용한다.
@@ -632,6 +990,119 @@ impl AppCore {
             .send(AppEvent::MdnsPeersUpdated { peers })
             .await
             .ok();
+    }
+
+    // ── InboundRequest 처리 ───────────────────────────────────────────────────
+
+    /// InboundRequest를 수신해 요청 종류에 따라 처리한다.
+    ///
+    /// - InviteRequest: 응답 채널을 보관하고 TUI에 승인 팝업 요청.
+    /// - ChunkRequest:  SeedingManager에서 청크를 읽어 암호화 후 응답.
+    /// - BitfieldRequest: 현재 방의 파일 bitfield를 응답.
+    async fn handle_inbound_request(&mut self, event: NetworkEvent) {
+        let NetworkEvent::InboundRequest { peer, request, channel } = event else { return };
+        match request {
+            AppRequest::InviteRequest { room_id, .. } => {
+                let room_name = self.room_store
+                    .get(&room_id)
+                    .map(|r| r.name.clone())
+                    .unwrap_or_else(|| "알 수 없는 방".to_string());
+
+                let invite_num = self.invite_counter;
+                self.invite_counter += 1;
+                self.pending_invite_channels.insert(invite_num, (peer, channel));
+
+                let from_display = {
+                    let s = peer.to_string();
+                    s[s.len().saturating_sub(12)..].to_string()
+                };
+
+                crate::invite::handler::on_invite_request(
+                    &mut self.invite_manager,
+                    peer,
+                    room_id,
+                    vec![],
+                    &self.app_tx,
+                    invite_num,
+                    room_name,
+                    from_display,
+                ).await;
+            }
+
+            // 08-protocol.md: ChunkResponse는 방 키 AES-256-GCM 암호화
+            AppRequest::ChunkRequest { file_hash, chunk_index } => {
+                let Some(room) = &self.active_room else {
+                    // 방 밖에서 온 청크 요청 — 무시
+                    let _ = (peer, channel);
+                    return;
+                };
+                let room_key = room.key.0;
+
+                // SeedingManager에서 해당 파일 경로 조회
+                let local_path = self.seeding_manager.local_path(&file_hash).cloned();
+                let can_serve = self.seeding_manager.try_serve_with_limit(
+                    &file_hash,
+                    chunk_index,
+                    262144, // 256KB 청크 크기 (10-file-transfer.md)
+                );
+
+                if !can_serve {
+                    // 해당 청크 없거나 속도 제한 — 응답 없이 드롭 (피어가 timeout 처리)
+                    let _ = (local_path, channel);
+                    return;
+                }
+
+                if let Some(path) = local_path {
+                    let offset = (chunk_index as u64) * 262144;
+                    match read_chunk_from_file(&path, offset, 262144) {
+                        Ok(chunk_data) => {
+                            // AES-256-GCM으로 청크 암호화 (nonce||ciphertext)
+                            match crate::crypto::encrypt(&room_key, &chunk_data) {
+                                Ok(encrypted) => {
+                                    let response = crate::network::codec::AppResponse::ChunkResponse {
+                                        chunk_index,
+                                        encrypted_data: encrypted.0,
+                                    };
+                                    self.net_tx.send(crate::network::event::NetworkCommand::SendResponse {
+                                        channel,
+                                        response,
+                                    }).await.ok();
+                                }
+                                Err(e) => {
+                                    self.app_tx.send(AppEvent::Error(format!("청크 암호화 실패: {e:?}"))).await.ok();
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            self.app_tx.send(AppEvent::Error(format!("청크 읽기 실패: {e}"))).await.ok();
+                        }
+                    }
+                }
+            }
+
+            // 08-protocol.md: BitfieldResponse — 전체 파일 목록 + 청크 보유 현황
+            AppRequest::BitfieldRequest { room_id } => {
+                // 요청한 방의 파일 bitfield 목록 응답
+                let files: Vec<([u8; 32], Vec<u8>)> = self.seeding_manager.entries
+                    .iter()
+                    .filter(|e| {
+                        // 현재 입장 중인 방과 일치하는지 확인
+                        self.active_room.as_ref()
+                            .map(|r| r.room_id == room_id)
+                            .unwrap_or(false)
+                            && e.status == crate::transfer::seeding::SeedStatus::Active
+                    })
+                    .map(|e| (e.file_hash, e.bitfield.as_bytes().to_vec()))
+                    .collect();
+
+                let response = crate::network::codec::AppResponse::BitfieldResponse { files };
+                self.net_tx.send(crate::network::event::NetworkCommand::SendResponse {
+                    channel,
+                    response,
+                }).await.ok();
+                let _ = peer;
+            }
+        }
     }
 
     // ── 피어 초대 ─────────────────────────────────────────────────────────────
@@ -679,4 +1150,23 @@ impl AppCore {
             .await
             .ok();
     }
+}
+
+// ── 파일 청크 읽기 헬퍼 ──────────────────────────────────────────────────────
+
+/// 지정한 파일의 `offset`부터 최대 `max_size` 바이트를 읽어 반환한다.
+///
+/// 10-file-transfer.md: 청크 크기 256KB, 마지막 청크는 더 작을 수 있음.
+fn read_chunk_from_file(
+    path: &std::path::Path,
+    offset: u64,
+    max_size: u64,
+) -> std::io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut buf = vec![0u8; max_size as usize];
+    let n = file.read(&mut buf)?;
+    buf.truncate(n);
+    Ok(buf)
 }

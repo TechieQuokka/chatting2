@@ -53,6 +53,13 @@ pub struct RoomStore {
 }
 
 impl RoomStore {
+    /// 빈 저장소를 생성한다 (rooms.enc 파일이 없는 초기 상태).
+    ///
+    /// `save()`를 호출하기 전까지 디스크에 기록되지 않는다.
+    pub fn new(path: PathBuf) -> Self {
+        Self { path, rooms: Vec::new() }
+    }
+
     /// rooms.enc를 복호화해 로드. 파일이 없으면 빈 저장소 반환.
     pub fn load(path: &Path, key: &[u8; 32]) -> Result<Self, RoomStoreError> {
         if !path.exists() {

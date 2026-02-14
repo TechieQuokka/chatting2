@@ -1,4 +1,4 @@
 ﻿pub mod command;
 pub mod log;
 
-pub use log::{LogEntry, LogEntryKind};
+pub use log::LogEntry;

@@ -22,7 +22,7 @@ pub enum TuiAction {
     /// 계정 등록 (main.rs에서 직접 처리).
     DoRegister { id: String, nickname: String, password: String },
     /// 계정 삭제 (main.rs에서 직접 처리).
-    DoDeleteAccount { id: String },
+    DoDeleteAccount { id: String, password: String },
     /// 앱 종료.
     Quit,
 }
@@ -35,6 +35,7 @@ pub enum TuiAction {
 /// 호출자(main.rs)가 screen을 교체한다.
 pub fn handle_key(screen: &mut Screen, key: KeyEvent) -> TuiAction {
     match screen {
+        Screen::Welcome(s) => handle_welcome(s, key),
         Screen::Login(s) => handle_login(s, key),
         Screen::Register(s) => handle_register(s, key),
         Screen::DeleteAccount(s) => handle_delete_account(s, key),
@@ -59,6 +60,18 @@ fn pop_char(buf: &mut String) {
     buf.pop();
 }
 
+// ── 시작 화면 ────────────────────────────────────────────────────────────────
+
+fn handle_welcome(_s: &mut WelcomeState, key: KeyEvent) -> TuiAction {
+    match key.code {
+        KeyCode::Char('1') => TuiAction::Goto(Screen::Login(LoginState::default())),
+        KeyCode::Char('2') => TuiAction::Goto(Screen::Register(RegisterState::default())),
+        KeyCode::Char('3') => TuiAction::Goto(Screen::DeleteAccount(DeleteAccountState::default())),
+        KeyCode::Char('q') | KeyCode::Char('Q') => TuiAction::Quit,
+        _ => TuiAction::None,
+    }
+}
+
 // ── 로그인 화면 ───────────────────────────────────────────────────────────────
 
 fn handle_login(s: &mut LoginState, key: KeyEvent) -> TuiAction {
@@ -73,21 +86,10 @@ fn handle_login(s: &mut LoginState, key: KeyEvent) -> TuiAction {
             LoginField::Id => pop_char(&mut s.id_input),
             LoginField::Pw => pop_char(&mut s.pw_input),
         },
-        KeyCode::Char(c) => {
-            // 숫자 키로 메뉴 선택 (ID 입력창이 비어 있을 때)
-            if s.id_input.is_empty() && s.pw_input.is_empty() {
-                match c {
-                    '2' => return TuiAction::Goto(Screen::Register(RegisterState::default())),
-                    '3' => return TuiAction::Goto(Screen::DeleteAccount(DeleteAccountState::default())),
-                    'q' | 'Q' => return TuiAction::Quit,
-                    _ => {}
-                }
-            }
-            match s.focused {
-                LoginField::Id => push_char(&mut s.id_input, c),
-                LoginField::Pw => push_char(&mut s.pw_input, c),
-            }
-        }
+        KeyCode::Char(c) => match s.focused {
+            LoginField::Id => push_char(&mut s.id_input, c),
+            LoginField::Pw => push_char(&mut s.pw_input, c),
+        },
         KeyCode::Enter => {
             if !s.id_input.is_empty() && !s.pw_input.is_empty() {
                 let id = s.id_input.clone();
@@ -96,11 +98,8 @@ fn handle_login(s: &mut LoginState, key: KeyEvent) -> TuiAction {
                 return TuiAction::DoLogin { id, password };
             }
         }
-        KeyCode::F(1) if s.id_input.is_empty() => {
-            // F1: 로그인 모드 (기본, 현재 화면 유지)
-        }
-        KeyCode::F(2) if s.id_input.is_empty() => {
-            return TuiAction::Goto(Screen::Register(RegisterState::default()));
+        KeyCode::Esc => {
+            return TuiAction::Goto(Screen::Welcome(WelcomeState::default()));
         }
         _ => {}
     }
@@ -146,7 +145,7 @@ fn handle_register(s: &mut RegisterState, key: KeyEvent) -> TuiAction {
             return TuiAction::DoRegister { id, nickname, password };
         }
         KeyCode::Esc => {
-            return TuiAction::Command(AppCommand::Shutdown); // Login 화면으로는 Screen 전환 필요
+            return TuiAction::Goto(Screen::Welcome(WelcomeState::default()));
         }
         _ => {}
     }
@@ -156,14 +155,40 @@ fn handle_register(s: &mut RegisterState, key: KeyEvent) -> TuiAction {
 // ── 계정 삭제 화면 ────────────────────────────────────────────────────────────
 
 fn handle_delete_account(s: &mut DeleteAccountState, key: KeyEvent) -> TuiAction {
+    use super::screen::DeleteField;
+
     match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') => {
-            if !s.id.is_empty() {
-                return TuiAction::DoDeleteAccount { id: s.id.clone() };
+        KeyCode::Tab => {
+            s.focused = match s.focused {
+                DeleteField::Id => DeleteField::Pw,
+                DeleteField::Pw => DeleteField::Id,
+            };
+        }
+        KeyCode::Backspace => match s.focused {
+            DeleteField::Id => pop_char(&mut s.id_input),
+            DeleteField::Pw => pop_char(&mut s.pw_input),
+        },
+        KeyCode::Char(c) => match s.focused {
+            DeleteField::Id => push_char(&mut s.id_input, c),
+            DeleteField::Pw => push_char(&mut s.pw_input, c),
+        },
+        // Enter로 최종 확인 — ID/PW가 모두 입력된 경우만 진행
+        KeyCode::Enter => {
+            if s.id_input.is_empty() {
+                s.error = Some("삭제할 계정 ID를 입력하세요.".into());
+                s.focused = DeleteField::Id;
+            } else if s.pw_input.is_empty() {
+                s.error = Some("비밀번호를 입력하세요.".into());
+                s.focused = DeleteField::Pw;
+            } else {
+                let id = s.id_input.clone();
+                let password = s.pw_input.clone();
+                s.pw_input.clear(); // 메모리에서 즉시 제거
+                return TuiAction::DoDeleteAccount { id, password };
             }
         }
         KeyCode::Esc => {
-            return TuiAction::Command(AppCommand::Shutdown); // Login으로 복귀는 Screen 전환 필요
+            return TuiAction::Goto(Screen::Login(LoginState::default()));
         }
         _ => {}
     }
@@ -189,7 +214,8 @@ fn handle_main_menu(s: &mut MainMenuState, key: KeyEvent) -> TuiAction {
                 return TuiAction::Command(AppCommand::AcceptInvite { number: Some(number) });
             }
             KeyCode::Char('d') | KeyCode::Char('D') => {
-                // 초대 거절 (현재 미구현)
+                let number = s.pending_invites[s.invite_cursor].number;
+                return TuiAction::Command(AppCommand::DeclineInvite { number: Some(number) });
             }
             KeyCode::Esc => {
                 s.show_invite_overlay = false;
@@ -216,7 +242,10 @@ fn handle_main_menu(s: &mut MainMenuState, key: KeyEvent) -> TuiAction {
             return TuiAction::Goto(Screen::FriendList(FriendListState::default()));
         }
         KeyCode::Char('5') => {
-            return TuiAction::Goto(Screen::Settings(SettingsState::default()));
+            return TuiAction::CommandAndGoto(
+                AppCommand::EnterSettings,
+                Screen::Settings(SettingsState::default()),
+            );
         }
         KeyCode::Char('q') | KeyCode::Char('Q') => {
             return TuiAction::Command(AppCommand::Shutdown);
@@ -229,6 +258,29 @@ fn handle_main_menu(s: &mut MainMenuState, key: KeyEvent) -> TuiAction {
 // ── 방 목록 화면 ─────────────────────────────────────────────────────────────
 
 fn handle_room_list(s: &mut RoomListState, key: KeyEvent) -> TuiAction {
+    // 삭제 확인 모드
+    if s.confirm_delete.is_some() {
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                if let Some(idx) = s.confirm_delete.take() {
+                    if let Some(room) = s.rooms.get(idx) {
+                        let room_id = room.room_id;
+                        s.rooms.remove(idx);
+                        if s.cursor >= s.rooms.len() && s.cursor > 0 {
+                            s.cursor -= 1;
+                        }
+                        return TuiAction::Command(AppCommand::DeleteRoom { room_id });
+                    }
+                }
+            }
+            _ => {
+                // 다른 키 → 취소
+                s.confirm_delete = None;
+            }
+        }
+        return TuiAction::None;
+    }
+
     match key.code {
         KeyCode::Up => {
             if s.cursor > 0 { s.cursor -= 1; }
@@ -247,7 +299,9 @@ fn handle_room_list(s: &mut RoomListState, key: KeyEvent) -> TuiAction {
             }
         }
         KeyCode::Char('d') | KeyCode::Char('D') => {
-            s.confirm_delete = Some(s.cursor);
+            if !s.rooms.is_empty() {
+                s.confirm_delete = Some(s.cursor);
+            }
         }
         KeyCode::Esc => {
             return TuiAction::Goto(Screen::MainMenu(MainMenuState::default()));
@@ -414,11 +468,37 @@ fn handle_settings(s: &mut SettingsState, key: KeyEvent) -> TuiAction {
         },
         _ => match key.code {
             KeyCode::Enter if s.editing => {
-                // 편집 완료 → 커맨드 전송
-                let action = apply_setting_edit(s);
-                s.editing = false;
-                s.edit_input.clear();
-                return action;
+                // 비밀번호 변경: 2단계 입력 처리
+                if s.category == SettingsCategory::Profile && s.cursor == 2 {
+                    match s.pw_change_step {
+                        1 => {
+                            // 1단계 완료: 현재 PW 저장 후 2단계로 이동
+                            s.pw_current_temp = s.edit_input.clone();
+                            s.edit_input.clear();
+                            s.pw_change_step = 2;
+                            // editing 유지
+                        }
+                        2 => {
+                            // 2단계 완료: ChangePassword 전송
+                            let action = TuiAction::Command(AppCommand::ChangePassword {
+                                current: s.pw_current_temp.clone(),
+                                new_pw: s.edit_input.clone(),
+                            });
+                            s.pw_current_temp.clear();
+                            s.pw_change_step = 0;
+                            s.editing = false;
+                            s.edit_input.clear();
+                            return action;
+                        }
+                        _ => {}
+                    }
+                } else {
+                    // 일반 설정 편집 완료
+                    let action = apply_setting_edit(s);
+                    s.editing = false;
+                    s.edit_input.clear();
+                    return action;
+                }
             }
             KeyCode::Char(c) if s.editing => {
                 push_char(&mut s.edit_input, c);
@@ -429,10 +509,25 @@ fn handle_settings(s: &mut SettingsState, key: KeyEvent) -> TuiAction {
             KeyCode::Esc if s.editing => {
                 s.editing = false;
                 s.edit_input.clear();
+                s.pw_change_step = 0;
+                s.pw_current_temp.clear();
             }
-            KeyCode::Enter => {
-                s.editing = true;
-                s.edit_input.clear();
+            KeyCode::Up if !s.editing => {
+                if s.cursor > 0 { s.cursor -= 1; }
+            }
+            KeyCode::Down if !s.editing => {
+                let max = category_item_count(s.category).saturating_sub(1);
+                if s.cursor < max { s.cursor += 1; }
+            }
+            // 토글 항목 (네트워크 모드, 언어)은 Space/Enter 로 즉시 전환
+            KeyCode::Char(' ') if !s.editing => {
+                let action = toggle_setting_field(s);
+                return action;
+            }
+            KeyCode::Enter if !s.editing => {
+                // 토글 항목은 Enter로도 전환
+                let action = toggle_or_edit(s);
+                return action;
             }
             KeyCode::Esc => {
                 s.category = SettingsCategory::Select;
@@ -456,11 +551,140 @@ fn index_to_category(idx: usize) -> SettingsCategory {
     }
 }
 
-fn apply_setting_edit(s: &SettingsState) -> TuiAction {
+fn category_item_count(cat: SettingsCategory) -> usize {
+    match cat {
+        SettingsCategory::Select => 7,
+        SettingsCategory::Profile => 3,    // ID(읽기전용), 닉네임, 비밀번호 변경
+        SettingsCategory::Network => 3,    // 네트워크 모드, 포트, 최대 연결 수
+        SettingsCategory::Chat => 1,       // 로그 경로
+        SettingsCategory::File => 4,       // 다운로드 경로, 최대 동시 다운로드, 업로드 속도, 다운로드 속도
+        SettingsCategory::RoomManage => 0,
+        SettingsCategory::FriendManage => 0,
+        SettingsCategory::Language => 1,   // 언어 선택
+    }
+}
+
+/// 토글 가능한 항목이면 즉시 전환, 아니면 텍스트 편집 모드 진입.
+fn toggle_or_edit(s: &mut SettingsState) -> TuiAction {
     match s.category {
-        SettingsCategory::Profile => {
-            TuiAction::Command(AppCommand::ChangeNickname { new_nickname: s.edit_input.clone() })
+        SettingsCategory::Network if s.cursor == 0 => {
+            // 네트워크 모드 토글
+            let new_val = if s.config.network_mode == "인터넷" { "인트라넷" } else { "인터넷" };
+            s.config.network_mode = new_val.to_string();
+            TuiAction::Command(AppCommand::UpdateConfigField {
+                field: "network_mode".to_string(),
+                value: new_val.to_string(),
+            })
         }
+        SettingsCategory::Language => {
+            let new_val = if s.config.language == "Korean" { "English" } else { "Korean" };
+            s.config.language = new_val.to_string();
+            TuiAction::Command(AppCommand::UpdateConfigField {
+                field: "language".to_string(),
+                value: new_val.to_string(),
+            })
+        }
+        _ => {
+            // Profile > ID(cursor=0): 읽기전용, 편집 불가
+            if s.category == SettingsCategory::Profile && s.cursor == 0 {
+                return TuiAction::None;
+            }
+            // 텍스트 편집 모드 진입
+            s.editing = true;
+            s.edit_input.clear();
+            if s.category == SettingsCategory::Profile && s.cursor == 2 {
+                // 비밀번호 변경 1단계 시작
+                s.pw_change_step = 1;
+            } else {
+                // 현재 값을 edit_input에 미리 채운다
+                s.edit_input = current_field_value(s).to_string();
+            }
+            TuiAction::None
+        }
+    }
+}
+
+fn toggle_setting_field(s: &mut SettingsState) -> TuiAction {
+    toggle_or_edit(s)
+}
+
+fn current_field_value(s: &SettingsState) -> &str {
+    match s.category {
+        SettingsCategory::Profile => match s.cursor {
+            0 => &s.config.user_id,  // read-only
+            1 => &s.config.nickname,
+            _ => "",                 // 비밀번호: pw_change 로직에서 처리
+        },
+        SettingsCategory::Network => match s.cursor {
+            0 => &s.config.network_mode,
+            1 => &s.config.port,
+            _ => &s.config.max_connections,
+        },
+        SettingsCategory::Chat => &s.config.log_path,
+        SettingsCategory::File => match s.cursor {
+            0 => &s.config.download_path,
+            1 => &s.config.max_concurrent_dl,
+            2 => &s.config.max_upload_kbps,
+            _ => &s.config.max_download_kbps,
+        },
+        SettingsCategory::Language => &s.config.language,
+        _ => "",
+    }
+}
+
+fn apply_setting_edit(s: &SettingsState) -> TuiAction {
+    let value = s.edit_input.clone();
+    match s.category {
+        SettingsCategory::Profile => match s.cursor {
+            0 => TuiAction::None, // ID: 읽기전용
+            1 => TuiAction::Command(AppCommand::UpdateConfigField {
+                field: "nickname".to_string(),
+                value,
+            }),
+            _ => TuiAction::None, // 비밀번호: 2단계 Enter 로직에서 처리
+        },
+        SettingsCategory::Network => match s.cursor {
+            0 => TuiAction::Command(AppCommand::UpdateConfigField {
+                field: "network_mode".to_string(),
+                value,
+            }),
+            1 => TuiAction::Command(AppCommand::UpdateConfigField {
+                field: "port".to_string(),
+                value,
+            }),
+            2 => TuiAction::Command(AppCommand::UpdateConfigField {
+                field: "max_connections".to_string(),
+                value,
+            }),
+            _ => TuiAction::None,
+        },
+        SettingsCategory::Chat => TuiAction::Command(AppCommand::UpdateConfigField {
+            field: "log_path".to_string(),
+            value,
+        }),
+        SettingsCategory::File => match s.cursor {
+            0 => TuiAction::Command(AppCommand::UpdateConfigField {
+                field: "download_path".to_string(),
+                value,
+            }),
+            1 => TuiAction::Command(AppCommand::UpdateConfigField {
+                field: "max_concurrent_dl".to_string(),
+                value,
+            }),
+            2 => TuiAction::Command(AppCommand::UpdateConfigField {
+                field: "max_upload_kbps".to_string(),
+                value,
+            }),
+            3 => TuiAction::Command(AppCommand::UpdateConfigField {
+                field: "max_download_kbps".to_string(),
+                value,
+            }),
+            _ => TuiAction::None,
+        },
+        SettingsCategory::Language => TuiAction::Command(AppCommand::UpdateConfigField {
+            field: "language".to_string(),
+            value,
+        }),
         _ => TuiAction::None,
     }
 }
@@ -476,13 +700,39 @@ fn handle_file_select(s: &mut FileSelectState, key: KeyEvent) -> TuiAction {
             if s.cursor + 1 < s.items.len() { s.cursor += 1; }
         }
         KeyCode::Char(' ') => {
-            // 선택 토글
-            if let Some(item) = s.items.get_mut(s.cursor) {
-                item.selected = !item.selected;
-                if item.selected {
-                    s.selected_size += item.size;
+            // 선택 토글 (12-tui.md: 폴더 선택 시 하위 파일 일괄 토글)
+            if let Some(item) = s.items.get(s.cursor) {
+                let is_dir = item.is_dir;
+                let depth = item.depth;
+                let new_val = !item.selected;
+
+                if is_dir {
+                    // 폴더: 현재 항목 + 더 깊은 depth의 연속 자식 항목 일괄 토글
+                    let cursor = s.cursor;
+                    let items_len = s.items.len();
+                    let mut i = cursor;
+                    while i < items_len {
+                        let d = s.items[i].depth;
+                        if i > cursor && d <= depth {
+                            break; // 같은 depth 또는 상위 depth → 자식 범위 종료
+                        }
+                        let prev = s.items[i].selected;
+                        s.items[i].selected = new_val;
+                        if new_val && !prev {
+                            s.selected_size += s.items[i].size;
+                        } else if !new_val && prev {
+                            s.selected_size = s.selected_size.saturating_sub(s.items[i].size);
+                        }
+                        i += 1;
+                    }
                 } else {
-                    s.selected_size = s.selected_size.saturating_sub(item.size);
+                    // 파일: 단일 항목 토글
+                    s.items[s.cursor].selected = new_val;
+                    if new_val {
+                        s.selected_size += s.items[s.cursor].size;
+                    } else {
+                        s.selected_size = s.selected_size.saturating_sub(s.items[s.cursor].size);
+                    }
                 }
             }
         }
@@ -497,18 +747,19 @@ fn handle_file_select(s: &mut FileSelectState, key: KeyEvent) -> TuiAction {
             }
         }
         KeyCode::Enter => {
-            // 선택된 파일들 다운로드 시작
-            let selected: Vec<_> = s.items.iter().filter(|i| i.selected && !i.is_dir).collect();
-            if !selected.is_empty() {
-                // 첫 번째 선택 파일만 예시 — 실제로는 여러 파일 StartDownload 필요
-                if let Some(first) = selected.first() {
-                    let cmd = AppCommand::StartDownload {
-                        file_hash: first.file_hash,
-                        file_name: first.name.clone(),
-                        chunk_count: (first.size / 262144) as u32 + 1,
-                    };
-                    return TuiAction::CommandAndGoto(cmd, Screen::MainMenu(MainMenuState::default()));
-                }
+            // 선택된 파일 전체 다운로드 시작 (12-tui.md: 파일 선택 화면)
+            let files: Vec<_> = s.items.iter()
+                .filter(|i| i.selected && !i.is_dir)
+                .map(|i| (
+                    i.file_hash,
+                    i.name.clone(),
+                    // 마지막 청크가 더 작을 수 있으므로 올림 계산
+                    ((i.size + 262143) / 262144) as u32,
+                ))
+                .collect();
+            if !files.is_empty() {
+                let cmd = AppCommand::StartDownloads { files };
+                return TuiAction::CommandAndGoto(cmd, Screen::Chat(ChatState::default()));
             }
         }
         KeyCode::Esc => {
@@ -559,11 +810,17 @@ fn handle_chat(s: &mut ChatState, key: KeyEvent) -> TuiAction {
         }
         KeyCode::Backspace => pop_char(&mut s.input),
         KeyCode::Char(c) => push_char(&mut s.input, c),
-        KeyCode::PageUp | KeyCode::Up => {
+        KeyCode::Up => {
             if s.feed_scroll > 0 { s.feed_scroll -= 1; }
         }
-        KeyCode::PageDown | KeyCode::Down => {
+        KeyCode::Down => {
             s.feed_scroll += 1;
+        }
+        KeyCode::PageUp => {
+            s.feed_scroll = s.feed_scroll.saturating_sub(3);
+        }
+        KeyCode::PageDown => {
+            s.feed_scroll = s.feed_scroll.saturating_add(3);
         }
         _ => {}
     }
@@ -637,7 +894,57 @@ fn parse_chat_command(text: String, s: &mut ChatState) -> TuiAction {
         Ok(Command::Message { text }) => {
             return TuiAction::Command(AppCommand::SendMessage { text });
         }
-        Ok(_) => {} // Help, List, Downloads, Seed 등
+        Ok(Command::Help) => {
+            use crate::room::RoomStore;
+            let now = RoomStore::now_ms();
+            let lines = [
+                "─── 도움말 ───────────────────────────────────────────",
+                " 채팅 / 방",
+                "  /quit              방에서 나가기",
+                "  /peers             접속 중인 피어 목록 표시",
+                "  /nick <닉네임>     닉네임 변경",
+                "  /invite            초대 코드 생성",
+                "  /accept [번호]     초대 수락 (번호 생략 시 첫 번째)",
+                " 파일 공유",
+                "  /share <경로>      파일 또는 폴더 공유 등록",
+                "  /list              이 방의 공유 파일 목록 표시",
+                "  /download <파일>   파일 다운로드 요청",
+                "  /downloads         진행 중인 다운로드 목록",
+                "  /seed              시딩 중인 파일 목록",
+                " 다운로드 관리",
+                "  /pause <번호>      다운로드 일시정지",
+                "  /resume <번호>     다운로드 재개",
+                "  /cancel <번호>     다운로드 취소",
+                "  /top <번호>        다운로드 순서를 맨 위로",
+                "  /up <번호>         다운로드 순서를 한 칸 위로",
+                "  /down <번호>       다운로드 순서를 한 칸 아래로",
+                " 시딩 관리",
+                "  /seed-pause <번호>   시딩 일시정지",
+                "  /seed-resume <번호>  시딩 재개",
+                "  /remove <번호>       시드 제거 (파일 유지)",
+                "  /remove-all <번호>   시드 제거 및 파일 삭제",
+                " 기타",
+                "  /help              이 도움말 표시",
+                "  Ctrl+C             방 나가기",
+                "─────────────────────────────────────────────────────",
+            ];
+            for line in lines {
+                s.feed.push(FeedItem {
+                    timestamp_ms: now,
+                    content: FeedContent::System(line.to_string()),
+                });
+            }
+        }
+        Ok(Command::List) => {
+            return TuiAction::Command(AppCommand::ListFiles);
+        }
+        Ok(Command::Downloads) => {
+            return TuiAction::Command(AppCommand::ListDownloads);
+        }
+        Ok(Command::Seed) => {
+            return TuiAction::Command(AppCommand::ListSeeds);
+        }
+        Ok(_) => {}
         Err(e) => {
             // 파싱 오류를 피드에 표시
             use crate::room::RoomStore;

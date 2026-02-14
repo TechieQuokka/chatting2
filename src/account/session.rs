@@ -20,7 +20,7 @@ use super::{
 ///       config.enc
 ///       rooms.enc        (나중에)
 ///       friends.enc      (나중에)
-///       chatting2.pid
+///       filetalk.pid
 /// ```
 #[derive(Clone)]
 pub struct AccountPaths {
@@ -49,7 +49,7 @@ impl AccountPaths {
     }
 
     pub fn pid_file(&self, id: &str) -> PathBuf {
-        self.user_dir(id).join("chatting2.pid")
+        self.user_dir(id).join("filetalk.pid")
     }
 }
 

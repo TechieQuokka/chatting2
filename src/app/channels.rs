@@ -20,6 +20,7 @@ pub enum AppCommand {
     // ── 방 ───────────────────────────────────────────────────────────────────
     CreateRoom { name: String, lifetime: RoomLifetime },
     JoinRoom { room_id: [u8; 32] },
+    DeleteRoom { room_id: [u8; 32] },
     LeaveRoom,
     ListRooms,
 
@@ -31,6 +32,7 @@ pub enum AppCommand {
     GenerateInviteCode,
     EnterInviteCode { code: String },
     AcceptInvite { number: Option<u32> },
+    DeclineInvite { number: Option<u32> },
     /// mDNS 탐색 목록에서 피어를 직접 초대 (인트라넷 모드).
     InviteMdnsPeer { peer_id_bytes: Vec<u8> },
     /// 친구를 PeerId로 초대 (DHT 조회 → 직접 연결).
@@ -39,6 +41,8 @@ pub enum AppCommand {
     // ── 파일 ─────────────────────────────────────────────────────────────────
     ShareFile { path: String },
     StartDownload { file_hash: [u8; 32], file_name: String, chunk_count: u32 },
+    /// 선택적 다운로드에서 여러 파일 동시 다운로드 (12-tui.md: 파일 선택 화면).
+    StartDownloads { files: Vec<([ u8; 32], String, u32)> }, // (file_hash, file_name, chunk_count)
     PauseDownload { number: u32 },
     ResumeDownload { number: u32 },
     CancelDownload { number: u32 },
@@ -56,6 +60,17 @@ pub enum AppCommand {
     // ── 친구 ─────────────────────────────────────────────────────────────────
     AddFriend { peer_id_bytes: Vec<u8> },
     RemoveFriend { peer_id_bytes: Vec<u8> },
+
+    // ── 설정 ─────────────────────────────────────────────────────────────────
+    /// 설정 화면 진입 시 현재 config 스냅샷을 요청한다.
+    EnterSettings,
+    /// 설정 항목 변경 (field: 필드명, value: 새 값 문자열).
+    UpdateConfigField { field: String, value: String },
+
+    // ── 목록 조회 (채팅 명령어) ───────────────────────────────────────────────
+    ListFiles,
+    ListDownloads,
+    ListSeeds,
 
     // ── 시스템 ───────────────────────────────────────────────────────────────
     Shutdown,
@@ -100,6 +115,21 @@ pub enum AppEvent {
     // ── mDNS 피어 목록 (인트라넷 초대용) ─────────────────────────────────────
     /// mDNS로 발견된 로컬 네트워크 피어 목록 갱신.
     MdnsPeersUpdated { peers: Vec<(PeerId, String)> }, // (PeerId, display addr)
+
+    // ── 설정 스냅샷 ───────────────────────────────────────────────────────────
+    ConfigSnapshot {
+        user_id: String,
+        nickname: String,
+        network_mode: String,
+        port: String,
+        max_connections: String,
+        download_path: String,
+        max_concurrent_dl: String,
+        max_upload_kbps: String,
+        max_download_kbps: String,
+        log_path: String,
+        language: String,
+    },
 
     // ── 오류 / 알림 ───────────────────────────────────────────────────────────
     Error(String),

@@ -383,29 +383,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "chatting2"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "argon2",
- "async-trait",
- "bincode",
- "chrono",
- "crossterm",
- "futures",
- "getrandom 0.4.1",
- "libp2p",
- "rand 0.10.0",
- "ratatui",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "zeroize",
-]
-
-[[package]]
 name = "chrono"
 version = "0.4.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -836,6 +813,29 @@ name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
+
+[[package]]
+name = "file-talk"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "argon2",
+ "async-trait",
+ "bincode",
+ "chrono",
+ "crossterm",
+ "futures",
+ "getrandom 0.4.1",
+ "libp2p",
+ "rand 0.10.0",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "zeroize",
+]
 
 [[package]]
 name = "find-msvc-tools"

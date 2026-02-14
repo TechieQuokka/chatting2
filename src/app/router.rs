@@ -1,5 +1,5 @@
 
-use crate::chat::{LogEntry, LogEntryKind};
+use crate::chat::log::{ChatLog, LogEntry, LogEntryKind};
 use crate::network::event::NetworkEvent;
 use crate::protocol::gossip::{self, GossipPayload};
 use crate::room::RoomKey;
@@ -9,9 +9,11 @@ use super::channels::{AppEvent, AppEventTx, NetworkCommandTx};
 /// NetworkEvent를 받아 App 이벤트로 변환하고 TUI 채널로 전송.
 ///
 /// 방 키가 필요한 이벤트는 현재 입장한 방 키로 복호화한다.
+/// `chat_log`가 Some이면 수신된 채팅/파일 이벤트를 디스크에 저장한다.
 pub async fn route_network_event(
     event: NetworkEvent,
     current_room_key: Option<&RoomKey>,
+    chat_log: Option<&ChatLog>,
     app_tx: &AppEventTx,
     _net_tx: &NetworkCommandTx,
 ) {
@@ -51,19 +53,31 @@ pub async fn route_network_event(
                             text: msg.text,
                         },
                     };
+                    // 수신 메시지를 디스크에 저장
+                    if let Some(log) = chat_log {
+                        log.append(&entry).ok();
+                    }
                     app_tx.send(AppEvent::FeedEntry(entry)).await.ok();
                 }
 
                 GossipPayload::FileAnnounce(announce) => {
                     let msg = format!("[파일] {} 공유됨 ({} bytes)", announce.name, announce.total_size);
+                    let file_entry = LogEntry::file_event(&msg);
+                    if let Some(log) = chat_log {
+                        log.append(&file_entry).ok();
+                    }
                     app_tx.send(AppEvent::FileAnnounced { announce: announce.clone() }).await.ok();
-                    app_tx.send(AppEvent::FeedEntry(LogEntry::file_event(&msg))).await.ok();
+                    app_tx.send(AppEvent::FeedEntry(file_entry)).await.ok();
                 }
 
                 GossipPayload::FileRemove(remove) => {
                     let msg = format!("[파일] 공유 철회됨");
+                    let file_entry = LogEntry::file_event(&msg);
+                    if let Some(log) = chat_log {
+                        log.append(&file_entry).ok();
+                    }
                     app_tx.send(AppEvent::FileRemoved { file_hash: remove.file_hash }).await.ok();
-                    app_tx.send(AppEvent::FeedEntry(LogEntry::file_event(&msg))).await.ok();
+                    app_tx.send(AppEvent::FeedEntry(file_entry)).await.ok();
                 }
 
                 GossipPayload::BitfieldUpdate(update) => {
