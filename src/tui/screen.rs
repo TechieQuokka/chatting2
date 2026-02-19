@@ -170,6 +170,8 @@ pub struct InviteEntryState {
     pub code_input: String,
     pub selected_room: Option<[u8; 32]>,
     pub ttl_remaining_ms: u64,
+    /// 코드 입력 후 대기 시작 시각 (ms). TTL 카운트다운 계산에 사용.
+    pub waiting_start_ms: u64,
     pub error: Option<String>,
 }
 
@@ -292,6 +294,8 @@ pub struct ChatState {
 
     /// 피드 내 대기 중인 초대 목록.
     pub pending_invites: Vec<PendingInviteInfo>,
+    pub show_invite_overlay: bool,
+    pub invite_cursor: usize,
 }
 
 /// 피드에 표시되는 항목.

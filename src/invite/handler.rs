@@ -79,6 +79,7 @@ pub async fn approve(
     room_topic: &libp2p::gossipsub::IdentTopic,
     my_peer_id_bytes: Vec<u8>,
     code_hash: [u8; 32],
+    room_name: String,
     response_channel: libp2p::request_response::ResponseChannel<crate::network::codec::AppResponse>,
     net_tx: &mpsc::Sender<NetworkCommand>,
 ) {
@@ -89,7 +90,7 @@ pub async fn approve(
     net_tx
         .send(NetworkCommand::SendResponse {
             channel: response_channel,
-            response: AppResponse::InviteAccepted { encrypted_room_key },
+            response: AppResponse::InviteAccepted { encrypted_room_key, room_name },
         })
         .await
         .ok();

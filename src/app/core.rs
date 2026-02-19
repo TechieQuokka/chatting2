@@ -13,8 +13,8 @@ use crate::invite::session::InviteManager;
 use crate::network::codec::{AppRequest, AppResponse};
 use crate::network::event::{NetworkCommand, NetworkEvent};
 use crate::protocol::gossip::{self, GossipPayload};
-use crate::room::{RoomKey, RoomLifetime, RoomStore};
-use crate::transfer::{DownloadManager, SeedingManager};
+use crate::room::{RoomKey, RoomLifetime, RoomRecord, RoomStore};
+use crate::transfer::{DownloadManager, PeerBitfields, SeedingManager};
 
 use super::channels::{AppCommand, AppCommandRx, AppEvent, AppEventTx};
 use super::router::route_network_event;
@@ -82,6 +82,14 @@ pub struct AppCore {
     pending_invite_channels: HashMap<u32, (PeerId, request_response::ResponseChannel<AppResponse>)>,
     /// 다음 초대 번호 (단조 증가).
     invite_counter: u32,
+    /// DHT 조회 중인 초대 코드 (KadGetRecordResult 처리용).
+    pending_invite_code: Option<String>,
+    /// 피초대자 측: InviteRequest 전송 후 InviteAccepted 대기 중인 방 ID.
+    pending_invite_room_id: Option<[u8; 32]>,
+
+    // ── 파일 전송 ─────────────────────────────────────────────────────────────
+    /// 피어별 청크 보유 현황 (다운로드 스케줄링용).
+    peer_bitfields: PeerBitfields,
 
     // ── 채널 ─────────────────────────────────────────────────────────────────
     cmd_rx: AppCommandRx,
@@ -121,6 +129,9 @@ impl AppCore {
             invite_manager: InviteManager::default(),
             pending_invite_channels: HashMap::new(),
             invite_counter: 0,
+            pending_invite_code: None,
+            pending_invite_room_id: None,
+            peer_bitfields: PeerBitfields::default(),
             cmd_rx,
             app_tx,
             net_tx,
@@ -155,12 +166,27 @@ impl AppCore {
                     // InboundRequest는 ResponseChannel 소유권이 필요하므로 분리 처리
                     if let NetworkEvent::InboundRequest { .. } = event {
                         self.handle_inbound_request(event).await;
+                    } else if let NetworkEvent::InboundResponse { peer, response } = event {
+                        // InboundResponse: ChunkResponse, BitfieldResponse, InviteAccepted/Rejected
+                        self.handle_inbound_response(peer, response).await;
                     } else {
                         // mDNS 이벤트 먼저 처리 (AppCore 내부 상태 갱신)
                         self.preprocess_network_event(&event).await;
-                        let room_key = self.active_room.as_ref().map(|r| &r.key);
-                        let chat_log = self.active_room.as_ref().map(|r| &r.chat_log);
-                        route_network_event(event, room_key, chat_log, &self.app_tx, &self.net_tx).await;
+                        // KadGetRecordResult: 초대 코드 조회 결과 처리
+                        if let NetworkEvent::KadGetRecordResult { result: Ok(ref bytes), .. } = event {
+                            let bytes = bytes.clone();
+                            self.handle_invite_dht_result(bytes).await;
+                        } else if let NetworkEvent::KadGetProvidersResult { ref key, ref providers } = event {
+                            // 방 입장 시 동기화: 각 Provider에게 BitfieldRequest 전송
+                            // 방 목록 배경 조회: RoomPeerCount 이벤트 emit
+                            let key_bytes = key.as_ref().to_vec();
+                            let providers = providers.clone();
+                            self.handle_providers_for_sync(&key_bytes, providers).await;
+                        } else {
+                            let room_key = self.active_room.as_ref().map(|r| &r.key);
+                            let chat_log = self.active_room.as_ref().map(|r| &r.chat_log);
+                            route_network_event(event, room_key, chat_log, &self.app_tx, &self.net_tx).await;
+                        }
                     }
                 }
 
@@ -332,11 +358,20 @@ impl AppCore {
                     let enc_key = self.account_enc_key();
                     self.room_store.save(&enc_key).ok();
                 }
-                // 로컬 저장소 기반 목록 — 실시간 피어 수 미확인이므로 Some(0) → Offline
+                // 05-room.md: 캐시 즉시 표시 (None → Checking 상태)
                 let rooms: Vec<_> = self.room_store.all().iter().map(|r| {
-                    (r.room_id, r.name.clone(), Some(0u32))
+                    (r.room_id, r.name.clone(), None)
                 }).collect();
+                // 백그라운드 DHT 조회를 위해 room_id 목록 미리 수집
+                let room_ids: Vec<[u8; 32]> = rooms.iter().map(|(id, _, _)| *id).collect();
                 self.app_tx.send(AppEvent::RoomList { rooms }).await.ok();
+                // 각 방 피어 수 배경 DHT 조회
+                for room_id in room_ids {
+                    self.net_tx
+                        .send(NetworkCommand::GetProviders { key: room_id.to_vec() })
+                        .await
+                        .ok();
+                }
             }
 
             AppCommand::ListPeers => {
@@ -352,8 +387,8 @@ impl AppCore {
                 self.generate_invite_code().await;
             }
 
-            AppCommand::EnterInviteCode { code } => {
-                self.enter_invite_code(code).await;
+            AppCommand::EnterInviteCode { url, code } => {
+                self.enter_invite_code(url, code).await;
             }
 
             AppCommand::AcceptInvite { number } => {
@@ -376,7 +411,12 @@ impl AppCore {
                     };
                     let room_key = room.key.clone();
                     let room_topic = room.topic.clone();
+                    let room_id = room.room_id;
                     let my_peer_id_bytes = self.identity.keypair().public().to_peer_id().to_bytes();
+                    // 방 이름을 rooms.enc에서 조회 (피초대자가 rooms.enc에 저장할 때 사용)
+                    let room_name = self.room_store.get(&room_id)
+                        .map(|r| r.name.clone())
+                        .unwrap_or_default();
                     crate::invite::handler::approve(
                         &mut self.invite_manager,
                         peer,
@@ -384,6 +424,7 @@ impl AppCore {
                         &room_topic,
                         my_peer_id_bytes,
                         [0u8; 32],
+                        room_name,
                         channel,
                         &self.net_tx,
                     ).await;
@@ -653,6 +694,12 @@ impl AppCore {
             .await
             .ok();
 
+        // 05-room.md: 방 입장 시 동기화 — 기존 피어들에게 BitfieldRequest 전송
+        self.net_tx
+            .send(NetworkCommand::GetProviders { key: room_id.to_vec() })
+            .await
+            .ok();
+
         // 시딩 재개 (자동 일시정지 상태만)
         self.seeding_manager.auto_resume_on_rejoin();
 
@@ -745,6 +792,9 @@ impl AppCore {
         self.download_manager.auto_pause_all();
 
         // RoomKey는 ActiveRoom이 drop되면서 ZeroizeOnDrop으로 자동 제로화됨
+
+        // 방 퇴장 시 PeerBitfields 초기화 (다음 방 입장에서 재구성)
+        self.peer_bitfields = PeerBitfields::default();
 
         self.app_tx.send(AppEvent::LeftRoom).await.ok();
     }
@@ -846,6 +896,14 @@ impl AppCore {
 
         let msg = format!("[↓] '{}' 다운로드 시작", file_name);
         self.app_tx.send(AppEvent::FeedEntry(crate::chat::LogEntry::file_event(&msg))).await.ok();
+
+        // PeerBitfields가 이미 있으면 즉시 청크 요청 디스패치
+        let net_tx = self.net_tx.clone();
+        crate::transfer::transfer_loop::dispatch_chunk_requests(
+            &mut self.download_manager,
+            &self.peer_bitfields,
+            &net_tx,
+        ).await;
     }
 
     // ── 초대 코드 생성/입력 ───────────────────────────────────────────────────
@@ -882,13 +940,84 @@ impl AppCore {
         }
     }
 
-    async fn enter_invite_code(&mut self, code: String) {
+    async fn enter_invite_code(&mut self, url: String, code: String) {
+        // 먼저 제공된 URL로 피어에 직접 다이얼 시도
+        // IP:PORT 단축 형식과 Multiaddr 전체 형식 모두 지원
+        if !url.is_empty() {
+            let addr_opt: Option<libp2p::Multiaddr> = if url.starts_with('/') {
+                url.parse().ok()
+            } else if let Some((host, port)) = url.split_once(':') {
+                format!("/ip4/{host}/tcp/{port}").parse().ok()
+                    .or_else(|| format!("/dns4/{host}/tcp/{port}").parse().ok())
+            } else {
+                None
+            };
+
+            match addr_opt {
+                Some(addr) => {
+                    self.net_tx.send(crate::network::event::NetworkCommand::DialPeer { addr }).await.ok();
+                }
+                None => {
+                    self.app_tx.send(AppEvent::Notice(
+                        format!("주소 형식 오류: '{url}' — 올바른 형식: 192.168.1.1:40000")
+                    )).await.ok();
+                    // URL이 잘못되어도 DHT 조회는 계속 진행
+                }
+            }
+        }
         // DHT에서 초대 레코드 조회
         let dht_key = crate::invite::hash_code(&code).to_vec();
+        self.pending_invite_code = Some(code.clone());
         self.net_tx.send(crate::network::event::NetworkCommand::GetRecord {
             key: dht_key,
         }).await.ok();
         self.app_tx.send(AppEvent::Notice(format!("초대 코드 '{}' 조회 중...", code))).await.ok();
+    }
+
+    /// DHT 초대 레코드 조회 성공 시 처리.
+    ///
+    /// 1. 레코드 디코드 + 서명 검증
+    /// 2. creator_public_key → PeerId 변환
+    /// 3. InviteRequest 전송
+    async fn handle_invite_dht_result(&mut self, bytes: Vec<u8>) {
+        let Some(code) = self.pending_invite_code.take() else { return };
+
+        let record = match crate::invite::code::decode_dht_record(&bytes) {
+            Ok(r) => r,
+            Err(e) => {
+                self.app_tx.send(AppEvent::Error(format!("초대 레코드 디코드 실패: {e}"))).await.ok();
+                return;
+            }
+        };
+
+        if let Err(e) = crate::invite::code::verify_dht_record(&code, &record) {
+            self.app_tx.send(AppEvent::Error(format!("초대 코드 서명 검증 실패: {e}"))).await.ok();
+            return;
+        }
+
+        let public_key = match libp2p::identity::PublicKey::try_decode_protobuf(&record.creator_public_key) {
+            Ok(pk) => pk,
+            Err(_) => {
+                self.app_tx.send(AppEvent::Error("초대 레코드의 공개키가 유효하지 않습니다.".into())).await.ok();
+                return;
+            }
+        };
+        let host_peer_id = public_key.to_peer_id();
+        let room_id = record.room_id;
+        let my_peer_id_bytes = self.identity.keypair().public().to_peer_id().to_bytes();
+
+        self.app_tx.send(AppEvent::Notice(format!("호스트에게 입장 요청 전송 중..."))).await.ok();
+
+        // InviteAccepted 수신 시 방 ID를 알 수 있도록 저장
+        self.pending_invite_room_id = Some(room_id);
+
+        self.net_tx.send(NetworkCommand::SendRequest {
+            peer: host_peer_id,
+            request: AppRequest::InviteRequest {
+                room_id,
+                requester_peer_id: my_peer_id_bytes,
+            },
+        }).await.ok();
     }
 
     // ── DHT 재등록 ────────────────────────────────────────────────────────────
@@ -990,6 +1119,207 @@ impl AppCore {
             .send(AppEvent::MdnsPeersUpdated { peers })
             .await
             .ok();
+    }
+
+    // ── InboundResponse 처리 ──────────────────────────────────────────────────
+
+    /// InboundResponse를 수신해 응답 종류에 따라 처리한다.
+    ///
+    /// - InviteAccepted:   방 키 추출 → rooms.enc 저장 → 방 입장
+    /// - InviteRejected:   에러 메시지 표시
+    /// - BitfieldResponse: PeerBitfields 갱신 → 청크 요청 디스패치
+    /// - ChunkResponse:    복호화 → 검증 → 디스크 기록 → 진행률 갱신
+    async fn handle_inbound_response(&mut self, peer: PeerId, response: AppResponse) {
+        use crate::network::codec::RejectReason;
+
+        match response {
+            AppResponse::InviteAccepted { encrypted_room_key, room_name } => {
+                let Some(room_id) = self.pending_invite_room_id.take() else { return };
+
+                let Some(room_key) = crate::invite::handler::on_invite_accepted(encrypted_room_key) else {
+                    self.app_tx.send(AppEvent::Error("방 키 추출 실패".into())).await.ok();
+                    return;
+                };
+
+                // 방 이름: 수락자가 전송한 실제 이름 사용, 비어있으면 임시 이름으로 대체
+                let name = if room_name.is_empty() {
+                    let room_hex: String = room_id.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                    format!("room-{room_hex}")
+                } else {
+                    room_name
+                };
+
+                let record = RoomRecord {
+                    room_id,
+                    name,
+                    key: room_key,
+                    created_at_ms: RoomStore::now_ms(),
+                    lifetime: RoomLifetime::Unlimited, // 정확한 수명 불명 → 무제한 임시 처리
+                    files: Vec::new(),
+                    last_sync_ms: None,
+                };
+                self.room_store.insert(record);
+                let enc_key = self.account_enc_key();
+                self.room_store.save(&enc_key).ok();
+
+                // 방 입장
+                self.join_room(room_id).await;
+                let _ = peer;
+            }
+
+            AppResponse::InviteRejected { reason } => {
+                let msg = match reason {
+                    RejectReason::Declined => "초대 거절됨".to_string(),
+                    RejectReason::Expired => "초대 코드 만료됨".to_string(),
+                    RejectReason::TooManyAttempts => "초대 코드 입력 횟수 초과".to_string(),
+                };
+                self.app_tx.send(AppEvent::Error(msg)).await.ok();
+                let _ = peer;
+            }
+
+            AppResponse::BitfieldResponse { files } => {
+                self.on_bitfield_response(peer, files).await;
+            }
+
+            AppResponse::ChunkResponse { chunk_index, encrypted_data } => {
+                self.on_chunk_response(peer, chunk_index, encrypted_data).await;
+            }
+        }
+    }
+
+    /// BitfieldResponse 수신: PeerBitfields 갱신 → 청크 요청 디스패치 → rooms.enc 동기화 시각 갱신.
+    async fn on_bitfield_response(&mut self, peer: PeerId, files: Vec<([u8; 32], Vec<u8>)>) {
+        let Some(room) = &self.active_room else { return };
+        let room_id = room.room_id;
+
+        for (file_hash, bitfield_bytes) in files {
+            let chunk_count = self.room_store.get(&room_id)
+                .and_then(|r| r.files.iter().find(|f| f.file_hash == file_hash))
+                .map(|f| f.chunk_count)
+                .unwrap_or(0);
+
+            if chunk_count > 0 {
+                let bf = crate::transfer::Bitfield::from_bytes(bitfield_bytes, chunk_count);
+                self.peer_bitfields.update(file_hash, peer, bf);
+            }
+        }
+
+        // PeerBitfields 갱신 후 청크 요청 디스패치
+        let net_tx = self.net_tx.clone();
+        crate::transfer::transfer_loop::dispatch_chunk_requests(
+            &mut self.download_manager,
+            &self.peer_bitfields,
+            &net_tx,
+        ).await;
+
+        // rooms.enc 마지막 동기화 시각 갱신
+        if let Some(r) = self.room_store.get_mut(&room_id) {
+            r.last_sync_ms = Some(RoomStore::now_ms());
+        }
+        let enc_key = self.account_enc_key();
+        self.room_store.save(&enc_key).ok();
+    }
+
+    /// ChunkResponse 수신: 복호화 → 해시 검증 → 디스크 기록 → 진행률 이벤트 → 다음 청크 디스패치.
+    async fn on_chunk_response(&mut self, peer: PeerId, chunk_index: u32, encrypted_data: Vec<u8>) {
+        let Some(room) = &self.active_room else { return };
+        let room_key = room.key.0;
+        let room_id = room.room_id;
+
+        // in_flight에서 해당 chunk_index를 가진 활성 다운로드 엔트리 찾기
+        let Some(entry) = self.download_manager.entries.iter()
+            .find(|e| {
+                e.status == crate::transfer::DownloadStatus::Active
+                    && e.in_flight.contains(&chunk_index)
+            })
+        else { return };
+
+        let file_hash = entry.file_hash;
+        let file_name = entry.file_name.clone();
+        let chunk_count = entry.chunk_count;
+
+        // rooms.enc에서 chunk_hashes 조회
+        let chunk_hashes: Vec<[u8; 32]> = self.room_store.get(&room_id)
+            .and_then(|r| r.files.iter().find(|f| f.file_hash == file_hash))
+            .map(|f| f.chunk_hashes.clone())
+            .unwrap_or_default();
+
+        match crate::transfer::transfer_loop::handle_chunk_response(
+            &mut self.download_manager,
+            peer,
+            &file_hash,
+            chunk_index,
+            encrypted_data,
+            &room_key,
+            &chunk_hashes,
+            &file_hash,
+        ) {
+            Ok(completed) => {
+                if let Some(e) = self.download_manager.entries.iter()
+                    .find(|e| e.file_hash == file_hash)
+                {
+                    let done = e.bitfield.completed();
+                    self.app_tx.send(AppEvent::DownloadProgress {
+                        file_hash,
+                        completed_chunks: done,
+                        total_chunks: chunk_count,
+                        status: e.status.clone(),
+                    }).await.ok();
+                }
+                if completed {
+                    self.app_tx.send(AppEvent::DownloadComplete { file_hash, file_name }).await.ok();
+                }
+            }
+            Err(e) => {
+                self.app_tx.send(AppEvent::Error(format!("청크 처리 오류: {e}"))).await.ok();
+            }
+        }
+
+        // 다음 청크 요청 디스패치
+        let net_tx = self.net_tx.clone();
+        crate::transfer::transfer_loop::dispatch_chunk_requests(
+            &mut self.download_manager,
+            &self.peer_bitfields,
+            &net_tx,
+        ).await;
+    }
+
+    /// KadGetProvidersResult 수신:
+    /// 1. 방 목록 배경 조회 — RoomPeerCount 이벤트 emit (항상)
+    /// 2. 방 입장 동기화 — 활성 방 일치 시 각 Provider에게 BitfieldRequest 전송
+    async fn handle_providers_for_sync(&mut self, key_bytes: &[u8], providers: Vec<PeerId>) {
+        let my_peer_id = self.identity.keypair().public().to_peer_id();
+
+        // key_bytes → room_id (32바이트인 경우에만 처리)
+        if key_bytes.len() == 32 {
+            let mut room_id = [0u8; 32];
+            room_id.copy_from_slice(key_bytes);
+
+            // 자신을 제외한 피어 수 계산
+            let peer_count = providers.iter().filter(|p| **p != my_peer_id).count() as u32;
+
+            // 알려진 방에 대해서만 RoomPeerCount 이벤트 emit
+            if self.room_store.get(&room_id).is_some() {
+                self.app_tx
+                    .send(AppEvent::RoomPeerCount { room_id, count: peer_count })
+                    .await
+                    .ok();
+            }
+
+            // 활성 방과 일치하면 각 Provider에게 BitfieldRequest 전송 (입장 동기화)
+            let active_room_id = self.active_room.as_ref().map(|r| r.room_id);
+            if active_room_id == Some(room_id) {
+                for provider in providers {
+                    if provider == my_peer_id {
+                        continue; // 자신에게는 요청하지 않음
+                    }
+                    self.net_tx.send(NetworkCommand::SendRequest {
+                        peer: provider,
+                        request: AppRequest::BitfieldRequest { room_id },
+                    }).await.ok();
+                }
+            }
+        }
     }
 
     // ── InboundRequest 처리 ───────────────────────────────────────────────────

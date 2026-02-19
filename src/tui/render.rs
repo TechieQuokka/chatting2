@@ -475,7 +475,7 @@ fn render_invite_entry(frame: &mut Frame, state: &InviteEntryState, lang: Lang) 
 
     let inner = Rect::new(area.x + 2, area.y + 1, area.width - 4, area.height - 2);
     let enter_confirm = if lang == Lang::English { "Enter Confirm  Esc Cancel" } else { "Enter 확인  Esc 취소" };
-    let enter_connect = if lang == Lang::English { "Enter Connect  Esc Cancel" } else { "Enter 연결  Esc 취소" };
+    let _enter_connect = if lang == Lang::English { "Enter Connect  Esc Cancel" } else { "Enter 연결  Esc 취소" };
     let enter_retry = if lang == Lang::English { "Enter Retry  Esc Cancel" } else { "Enter 다시 시도  Esc 취소" };
     let code_lbl = t(lang, Key::InviteCode);
     let url_lbl = if lang == Lang::English { "Room URL" } else { "방 URL" };
@@ -488,9 +488,18 @@ fn render_invite_entry(frame: &mut Frame, state: &InviteEntryState, lang: Lang) 
                 Paragraph::new(format!("{url_lbl} : [{}]", state.url_input)),
                 Rect::new(inner.x, inner.y, inner.width, 1),
             );
+            let hint = if lang == Lang::English {
+                "e.g. 192.168.1.1:40000  (empty = skip)"
+            } else {
+                "예: 192.168.1.1:40000  (비우면 건너뜀)"
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))),
+                Rect::new(inner.x, inner.y + 1, inner.width, 1),
+            );
             frame.render_widget(
                 Paragraph::new(enter_confirm),
-                Rect::new(inner.x, inner.y + 2, inner.width, 1),
+                Rect::new(inner.x, inner.y + 3, inner.width, 1),
             );
         }
         InviteStep::RoomSelect => {
@@ -503,12 +512,17 @@ fn render_invite_entry(frame: &mut Frame, state: &InviteEntryState, lang: Lang) 
         }
         InviteStep::CodeInput => {
             frame.render_widget(
-                Paragraph::new(format!("{code_lbl} : [{}]", state.code_input)),
-                Rect::new(inner.x, inner.y + 1, inner.width, 1),
+                Paragraph::new(format!("{url_lbl} : {}", state.url_input)),
+                Rect::new(inner.x, inner.y, inner.width, 1),
             );
             frame.render_widget(
-                Paragraph::new(enter_connect),
-                Rect::new(inner.x, inner.y + 3, inner.width, 1),
+                Paragraph::new(format!("{code_lbl} : [{}]", state.code_input)),
+                Rect::new(inner.x, inner.y + 2, inner.width, 1),
+            );
+            let esc_back = if lang == Lang::English { "Enter Connect  Esc Back" } else { "Enter 연결  Esc 뒤로" };
+            frame.render_widget(
+                Paragraph::new(esc_back),
+                Rect::new(inner.x, inner.y + 4, inner.width, 1),
             );
         }
         InviteStep::Waiting => {
@@ -854,17 +868,20 @@ fn render_chat(frame: &mut Frame, state: &ChatState, lang: Lang) {
     let transfer_lines: Vec<Line> = if state.active_downloads.is_empty() {
         vec![Line::raw(""), Line::raw(""), Line::raw("")]
     } else {
-        let mut lines: Vec<Line> = state.active_downloads.iter().take(2).map(|dl| {
+        // 12-tui.md: 최대 3개 표시, 3개 초과 시 마지막 줄을 요약으로 대체
+        let mut lines: Vec<Line> = state.active_downloads.iter().take(3).map(|dl| {
             let bps = format_bps(dl.bps);
             Line::raw(format!(" [↓] {:<20} {:>5.1}%  {}", dl.file_name, dl.pct, bps))
         }).collect();
 
-        if state.active_downloads.len() > 2 {
+        if state.active_downloads.len() > 3 {
+            let extra = state.active_downloads.len() - 2;
             let more_lbl = if lang == Lang::English {
-                format!(" +{} more in progress...  /downloads", state.active_downloads.len() - 2)
+                format!(" +{extra} more in progress...  /downloads")
             } else {
-                format!(" 외 {}개 진행 중...  /downloads", state.active_downloads.len() - 2)
+                format!(" 외 {extra}개 진행 중...  /downloads")
             };
+            lines.truncate(2);
             lines.push(Line::raw(more_lbl));
         } else {
             while lines.len() < 3 {
@@ -908,6 +925,11 @@ fn render_chat(frame: &mut Frame, state: &ChatState, lang: Lang) {
         Paragraph::new(format!("> {}", prompt)).style(input_style),
         chunks[3],
     );
+
+    // 초대 오버레이
+    if state.show_invite_overlay && !state.pending_invites.is_empty() {
+        render_invite_overlay(frame, &state.pending_invites, state.invite_cursor, lang);
+    }
 }
 
 fn feed_item_to_line(item: &FeedItem) -> Line<'static> {

@@ -324,6 +324,15 @@ async fn run_tui_loop(
         // 렌더링
         terminal.draw(|f| render(f, &screen, lang)).ok();
 
+        // InviteEntry TTL 카운트다운 갱신
+        if let Screen::InviteEntry(s) = &mut screen {
+            if s.step == InviteStep::Waiting && s.waiting_start_ms > 0 {
+                let now = crate::room::RoomStore::now_ms();
+                let elapsed = now.saturating_sub(s.waiting_start_ms);
+                s.ttl_remaining_ms = (3 * 60 * 1000u64).saturating_sub(elapsed);
+            }
+        }
+
         // AppEvent 비동기 수신 (non-blocking)
         while let Ok(event) = app_rx.try_recv() {
             // ConfigSnapshot에서 언어 설정 추출
@@ -348,7 +357,13 @@ async fn run_tui_loop(
         match action {
             TuiAction::Command(cmd) => {
                 let quit = matches!(cmd, AppCommand::Shutdown);
+                let is_invite_code = matches!(cmd, AppCommand::EnterInviteCode { .. });
                 cmd_tx.send(cmd).await.ok();
+                if is_invite_code {
+                    if let Screen::InviteEntry(s) = &mut screen {
+                        s.waiting_start_ms = crate::room::RoomStore::now_ms();
+                    }
+                }
                 if quit { break; }
             }
             TuiAction::Goto(new_screen) => {
@@ -447,6 +462,19 @@ fn handle_app_event(screen: &mut Screen, event: AppEvent) {
             }
         }
 
+        AppEvent::RoomPeerCount { room_id, count } => {
+            // 05-room.md: 배경 DHT GetProviders 완료 → 방 목록 피어 수 갱신
+            if let Screen::RoomList(s) = screen {
+                if let Some(entry) = s.rooms.iter_mut().find(|e| e.room_id == room_id) {
+                    entry.peer_status = if count == 0 {
+                        PeerStatus::Offline
+                    } else {
+                        PeerStatus::Online(count)
+                    };
+                }
+            }
+        }
+
         AppEvent::InviteCodeGenerated { code } => {
             if let Screen::Chat(s) = screen {
                 use crate::room::RoomStore;
@@ -466,6 +494,7 @@ fn handle_app_event(screen: &mut Screen, event: AppEvent) {
                         room_name,
                         number,
                     });
+                    s.show_invite_overlay = true;
                 }
                 Screen::MainMenu(s) => {
                     s.pending_invites.push(PendingInviteInfo {
@@ -493,11 +522,19 @@ fn handle_app_event(screen: &mut Screen, event: AppEvent) {
         }
 
         AppEvent::Error(msg) => {
-            add_system_feed(screen, format!("! {msg}"));
+            if let Screen::InviteEntry(s) = screen {
+                s.step = InviteStep::Failed(msg);
+            } else {
+                add_system_feed(screen, format!("! {msg}"));
+            }
         }
 
         AppEvent::Notice(msg) => {
-            add_system_feed(screen, msg);
+            if let Screen::InviteEntry(s) = screen {
+                s.error = Some(msg);
+            } else {
+                add_system_feed(screen, msg);
+            }
         }
 
         AppEvent::DownloadProgress { file_hash, completed_chunks, total_chunks, status } => {

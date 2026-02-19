@@ -30,7 +30,7 @@ pub enum AppCommand {
 
     // ── 초대 ─────────────────────────────────────────────────────────────────
     GenerateInviteCode,
-    EnterInviteCode { code: String },
+    EnterInviteCode { url: String, code: String },
     AcceptInvite { number: Option<u32> },
     DeclineInvite { number: Option<u32> },
     /// mDNS 탐색 목록에서 피어를 직접 초대 (인트라넷 모드).
@@ -130,6 +130,10 @@ pub enum AppEvent {
         log_path: String,
         language: String,
     },
+
+    // ── 방 피어 수 갱신 (배경 DHT 조회 완료) ─────────────────────────────────
+    /// ListRooms 이후 백그라운드 DHT GetProviders 완료 시 개별 방 피어 수 갱신.
+    RoomPeerCount { room_id: [u8; 32], count: u32 },
 
     // ── 오류 / 알림 ───────────────────────────────────────────────────────────
     Error(String),

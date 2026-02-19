@@ -39,10 +39,12 @@ pub enum AppResponse {
         /// (file_hash, bitfield_bytes) 목록
         files: Vec<([u8; 32], Vec<u8>)>,
     },
-    /// 초대 수락 (방 키 포함, Noise 암호화로 전송)
+    /// 초대 수락 (방 키 + 방 이름 포함, Noise 암호화로 전송)
     InviteAccepted {
         /// AES-256-GCM으로 암호화된 방 키 (nonce||ciphertext)
         encrypted_room_key: Vec<u8>,
+        /// 방 이름 (피초대자가 rooms.enc에 저장할 때 사용)
+        room_name: String,
     },
     /// 초대 거절
     InviteRejected {

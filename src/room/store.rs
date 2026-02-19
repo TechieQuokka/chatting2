@@ -125,6 +125,19 @@ impl RoomStore {
         Ok(self.rooms.last().unwrap())
     }
 
+    // ── 삽입 ─────────────────────────────────────────────────────────────────
+
+    /// 외부에서 생성한 `RoomRecord`를 저장소에 추가한다.
+    ///
+    /// 이미 동일한 room_id가 있으면 덮어쓴다 (초대 수락 시 재입장 지원).
+    pub fn insert(&mut self, record: RoomRecord) {
+        if let Some(existing) = self.rooms.iter_mut().find(|r| r.room_id == record.room_id) {
+            *existing = record;
+        } else {
+            self.rooms.push(record);
+        }
+    }
+
     // ── 조회 ─────────────────────────────────────────────────────────────────
 
     pub fn get(&self, room_id: &[u8; 32]) -> Option<&RoomRecord> {

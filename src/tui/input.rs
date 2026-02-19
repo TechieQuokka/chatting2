@@ -382,18 +382,49 @@ fn cycle_lifetime(current: RoomLifetime, forward: bool) -> RoomLifetime {
 
 fn handle_invite_entry(s: &mut InviteEntryState, key: KeyEvent) -> TuiAction {
     match &s.step {
+        InviteStep::UrlInput => match key.code {
+            KeyCode::Backspace => { pop_char(&mut s.url_input); }
+            KeyCode::Char(c) => { push_char(&mut s.url_input, c); }
+            KeyCode::Enter => {
+                // 빈 URL도 허용 — 이미 연결된 피어나 mDNS 탐색 피어 대상으로 코드만 입력
+                s.step = InviteStep::CodeInput;
+            }
+            KeyCode::Esc => {
+                return TuiAction::Goto(Screen::MainMenu(MainMenuState::default()));
+            }
+            _ => {}
+        },
+        InviteStep::RoomSelect => match key.code {
+            KeyCode::Up => {
+                if s.room_cursor > 0 { s.room_cursor -= 1; }
+            }
+            KeyCode::Down => {
+                if s.room_cursor + 1 < s.room_candidates.len() { s.room_cursor += 1; }
+            }
+            KeyCode::Enter => {
+                if let Some((id, _)) = s.room_candidates.get(s.room_cursor) {
+                    s.selected_room = Some(*id);
+                    s.step = InviteStep::CodeInput;
+                }
+            }
+            KeyCode::Esc => {
+                s.step = InviteStep::UrlInput;
+            }
+            _ => {}
+        },
         InviteStep::CodeInput => match key.code {
             KeyCode::Backspace => { pop_char(&mut s.code_input); }
             KeyCode::Char(c) => { push_char(&mut s.code_input, c); }
             KeyCode::Enter => {
                 if !s.code_input.is_empty() {
+                    let url = s.url_input.clone();
                     let code = s.code_input.clone().to_uppercase();
                     s.step = InviteStep::Waiting;
-                    return TuiAction::Command(AppCommand::EnterInviteCode { code });
+                    return TuiAction::Command(AppCommand::EnterInviteCode { url, code });
                 }
             }
             KeyCode::Esc => {
-                return TuiAction::Goto(Screen::MainMenu(MainMenuState::default()));
+                s.step = InviteStep::UrlInput;
             }
             _ => {}
         },
@@ -412,11 +443,6 @@ fn handle_invite_entry(s: &mut InviteEntryState, key: KeyEvent) -> TuiAction {
             }
             _ => {}
         },
-        _ => {
-            if key.code == KeyCode::Esc {
-                return TuiAction::Goto(Screen::MainMenu(MainMenuState::default()));
-            }
-        }
     }
     TuiAction::None
 }
@@ -774,6 +800,43 @@ fn handle_file_select(s: &mut FileSelectState, key: KeyEvent) -> TuiAction {
 // ── 채팅/파일 화면 ────────────────────────────────────────────────────────────
 
 fn handle_chat(s: &mut ChatState, key: KeyEvent) -> TuiAction {
+    // 초대 오버레이가 열려 있는 경우 먼저 처리
+    if s.show_invite_overlay && !s.pending_invites.is_empty() {
+        match key.code {
+            KeyCode::Up => {
+                if s.invite_cursor > 0 { s.invite_cursor -= 1; }
+            }
+            KeyCode::Down => {
+                if s.invite_cursor + 1 < s.pending_invites.len() {
+                    s.invite_cursor += 1;
+                }
+            }
+            KeyCode::Enter => {
+                let number = s.pending_invites[s.invite_cursor].number;
+                s.pending_invites.remove(s.invite_cursor);
+                if s.pending_invites.is_empty() { s.show_invite_overlay = false; }
+                if s.invite_cursor > 0 && s.invite_cursor >= s.pending_invites.len() {
+                    s.invite_cursor -= 1;
+                }
+                return TuiAction::Command(AppCommand::AcceptInvite { number: Some(number) });
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                let number = s.pending_invites[s.invite_cursor].number;
+                s.pending_invites.remove(s.invite_cursor);
+                if s.pending_invites.is_empty() { s.show_invite_overlay = false; }
+                if s.invite_cursor > 0 && s.invite_cursor >= s.pending_invites.len() {
+                    s.invite_cursor -= 1;
+                }
+                return TuiAction::Command(AppCommand::DeclineInvite { number: Some(number) });
+            }
+            KeyCode::Esc => {
+                s.show_invite_overlay = false;
+            }
+            _ => {}
+        }
+        return TuiAction::None;
+    }
+
     // Ctrl+C → 방 나가기
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return TuiAction::CommandAndGoto(

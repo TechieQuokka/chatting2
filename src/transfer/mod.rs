@@ -4,7 +4,7 @@ pub mod meta;
 pub mod seeding;
 pub mod transfer_loop;
 
-pub use bitfield::Bitfield;
+pub use bitfield::{Bitfield, PeerBitfields};
 pub use download::{DownloadManager, DownloadStatus};
 pub use meta::build_file_announce;
 pub use seeding::SeedingManager;
