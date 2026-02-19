@@ -512,6 +512,7 @@ fn handle_app_event(screen: &mut Screen, invite_queue: &mut Vec<(String, String,
                         format!("[초대 코드] {code}  |  내 ID: {my_id}  (3분간 유효)")
                     ),
                 });
+                s.feed_scroll = s.feed.len().saturating_sub(1);
             }
         }
 
@@ -543,6 +544,7 @@ fn handle_app_event(screen: &mut Screen, invite_queue: &mut Vec<(String, String,
                         format!("[파일] {} 공유됨 ({})", announce.name, format_size(announce.total_size))
                     ),
                 });
+                s.feed_scroll = s.feed.len().saturating_sub(1);
             }
         }
 
@@ -672,6 +674,7 @@ fn add_system_feed(screen: &mut Screen, msg: String) {
             timestamp_ms: RoomStore::now_ms(),
             content: FeedContent::System(msg),
         });
+        s.feed_scroll = s.feed.len().saturating_sub(1);
     }
 }
 
