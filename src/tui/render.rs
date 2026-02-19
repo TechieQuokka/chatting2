@@ -293,6 +293,19 @@ fn render_main_menu(frame: &mut Frame, state: &MainMenuState, lang: Lang) {
     };
     frame.render_widget(Paragraph::new(greeting), chunks[0]);
 
+    // 미처리 초대 배지 (방에 입장해야 확인 가능)
+    if state.invite_badge > 0 {
+        let badge = if lang == Lang::English {
+            format!("[ {} pending invite(s) — enter a room to view ]", state.invite_badge)
+        } else {
+            format!("[ 초대 {}건 대기 중 — 방에 입장하면 확인할 수 있습니다 ]", state.invite_badge)
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(badge, Style::default().fg(Color::Magenta))),
+            chunks[1],
+        );
+    }
+
     let items = [
         format!("[1] {}", t(lang, Key::CreateRoom)),
         format!("[2] {}", t(lang, Key::RoomList)),

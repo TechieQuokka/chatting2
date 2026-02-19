@@ -188,10 +188,22 @@ impl AppCore {
                                         self.app_tx.send(AppEvent::UrlNotFound).await.ok();
                                     }
                                 }
-                            } else if let Ok(bytes) = result {
-                                let bytes = bytes.clone();
-                                self.handle_invite_dht_result(bytes).await;
+                            } else if self.pending_invite_code.is_some() {
+                                // 초대 코드 DHT 조회 결과 — 성공/실패 모두 명시적으로 처리
+                                match result {
+                                    Ok(bytes) => {
+                                        let bytes = bytes.clone();
+                                        self.handle_invite_dht_result(bytes).await;
+                                    }
+                                    Err(_) => {
+                                        self.pending_invite_code = None;
+                                        self.app_tx.send(AppEvent::Error(
+                                            "초대 코드를 찾을 수 없습니다. 코드가 만료됐거나 잘못됐습니다.".into()
+                                        )).await.ok();
+                                    }
+                                }
                             }
+                            // else: pending 없는 stale DHT 응답 → 무시
                         } else if let NetworkEvent::KadGetProvidersResult { ref key, ref providers } = event {
                             // 방 입장 시 동기화: 각 Provider에게 BitfieldRequest 전송
                             // 방 목록 배경 조회: RoomPeerCount 이벤트 emit
@@ -1037,21 +1049,31 @@ impl AppCore {
     /// 1. 레코드 디코드 + 서명 검증
     /// 2. creator_public_key → PeerId 변환
     /// 3. InviteRequest 전송
+    ///
+    /// 검증 실패 시 pending_invite_code를 보존하여 이전 코드 조회의 지연 응답(stale)이
+    /// 현재 조회 중인 코드의 상태를 오염시키지 않도록 한다.
     async fn handle_invite_dht_result(&mut self, bytes: Vec<u8>) {
-        let Some(code) = self.pending_invite_code.take() else { return };
+        // take() 대신 clone() — 검증 실패 시 복원할 수 있도록
+        let Some(code) = self.pending_invite_code.clone() else { return };
 
         let record = match crate::invite::code::decode_dht_record(&bytes) {
             Ok(r) => r,
             Err(e) => {
+                // DHT 레코드 손상 — 코드를 클리어하고 오류 보고
+                self.pending_invite_code = None;
                 self.app_tx.send(AppEvent::Error(format!("초대 레코드 디코드 실패: {e}"))).await.ok();
                 return;
             }
         };
 
-        if let Err(e) = crate::invite::code::verify_dht_record(&code, &record) {
-            self.app_tx.send(AppEvent::Error(format!("초대 코드 서명 검증 실패: {e}"))).await.ok();
+        if let Err(_) = crate::invite::code::verify_dht_record(&code, &record) {
+            // 서명 불일치 — 이전 코드 조회의 stale 응답일 가능성이 높음
+            // pending_invite_code를 그대로 보존하고 무시
             return;
         }
+
+        // 검증 성공 — 이제 코드를 클리어하고 진행
+        self.pending_invite_code = None;
 
         let public_key = match libp2p::identity::PublicKey::try_decode_protobuf(&record.creator_public_key) {
             Ok(pk) => pk,
@@ -1226,6 +1248,8 @@ impl AppCore {
             }
 
             AppResponse::InviteRejected { reason } => {
+                // 거절 시 대기 중인 방 ID 클리어 — 다음 초대 시도가 오염되지 않도록
+                self.pending_invite_room_id = None;
                 let msg = match reason {
                     RejectReason::Declined => "초대 거절됨".to_string(),
                     RejectReason::Expired => "초대 코드 만료됨".to_string(),

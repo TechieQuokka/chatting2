@@ -97,6 +97,8 @@ pub enum DeleteField {
 #[derive(Debug, Default)]
 pub struct MainMenuState {
     pub nickname: String,
+    /// Chat 화면 밖에서 수신된 미처리 초대 건 수.
+    pub invite_badge: usize,
 }
 
 // ── 방 목록 화면 ─────────────────────────────────────────────────────────────

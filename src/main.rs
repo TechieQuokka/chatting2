@@ -319,9 +319,14 @@ async fn run_tui_loop(
         ..Default::default()
     });
     let mut lang = Lang::Korean;
+    // Chat 화면 밖에서 수신된 초대를 보관. 방에 입장하면 피드로 일괄 표시.
+    let mut invite_queue: Vec<(String, String, u32)> = Vec::new(); // (from, room, number)
 
     loop {
-        // 렌더링
+        // 렌더링 — MainMenu 배지를 항상 최신 큐 크기로 동기화
+        if let Screen::MainMenu(s) = &mut screen {
+            s.invite_badge = invite_queue.len();
+        }
         terminal.draw(|f| render(f, &screen, lang)).ok();
 
         // InviteEntry TTL 카운트다운 갱신
@@ -334,12 +339,32 @@ async fn run_tui_loop(
         }
 
         // AppEvent 비동기 수신 (non-blocking)
+        let was_chat = matches!(screen, Screen::Chat(_));
         while let Ok(event) = app_rx.try_recv() {
             // ConfigSnapshot에서 언어 설정 추출
             if let AppEvent::ConfigSnapshot { ref language, .. } = event {
                 lang = if language == "English" { Lang::English } else { Lang::Korean };
             }
-            handle_app_event(&mut screen, event);
+            handle_app_event(&mut screen, &mut invite_queue, event);
+        }
+        // 이번 이터레이션에서 Chat으로 전환됐다면 (JoinedRoom) 대기 중인 초대를 피드에 추가
+        // (JoinedRoom → 히스토리 FeedEntry들이 모두 처리된 뒤 이 시점에 삽입되므로 순서 보장)
+        if !was_chat {
+            if let Screen::Chat(s) = &mut screen {
+                if !invite_queue.is_empty() {
+                    for (from, room, number) in invite_queue.drain(..) {
+                        let msg = format!(
+                            "[초대] {}가 {} 으로 초대했습니다  (/approve {} 수락  /reject {} 거절)",
+                            from, room, number, number
+                        );
+                        s.feed.push(FeedItem {
+                            timestamp_ms: crate::room::RoomStore::now_ms(),
+                            content: FeedContent::Invite(msg),
+                        });
+                    }
+                    s.feed_scroll = s.feed.len().saturating_sub(1);
+                }
+            }
         }
 
         // 키 입력 (50ms 타임아웃)
@@ -388,7 +413,10 @@ async fn run_tui_loop(
 }
 
 /// AppEvent를 수신해 Screen 상태를 갱신한다.
-fn handle_app_event(screen: &mut Screen, event: AppEvent) {
+///
+/// Chat 화면 밖에서 수신된 InviteReceived는 `invite_queue`에 누적되며,
+/// 이후 Chat 화면 진입 시 run_tui_loop에서 피드로 일괄 표시된다.
+fn handle_app_event(screen: &mut Screen, invite_queue: &mut Vec<(String, String, u32)>, event: AppEvent) {
     match event {
         AppEvent::FeedEntry(entry) => {
             if let Screen::Chat(s) = screen {
@@ -489,6 +517,7 @@ fn handle_app_event(screen: &mut Screen, event: AppEvent) {
 
         AppEvent::InviteReceived { from_nickname, room_name, number, from_peer: _ } => {
             if let Screen::Chat(s) = screen {
+                // 이미 Chat 화면에 있으면 즉시 피드에 표시
                 use crate::room::RoomStore;
                 let msg = format!(
                     "[초대] {}가 {} 으로 초대했습니다  (/approve {} 수락  /reject {} 거절)",
@@ -499,6 +528,9 @@ fn handle_app_event(screen: &mut Screen, event: AppEvent) {
                     content: FeedContent::Invite(msg),
                 });
                 s.feed_scroll = s.feed.len().saturating_sub(1);
+            } else {
+                // Chat 화면 밖에 있으면 큐에 누적 — 방 입장 시 피드로 표시
+                invite_queue.push((from_nickname, room_name, number));
             }
         }
 
