@@ -487,27 +487,18 @@ fn handle_app_event(screen: &mut Screen, event: AppEvent) {
             }
         }
 
-        AppEvent::InviteReceived { from_nickname, room_name, number, from_peer } => {
-            match screen {
-                Screen::Chat(s) => {
-                    s.pending_invites.push(PendingInviteInfo {
-                        from_peer,
-                        from_display: from_nickname,
-                        room_name,
-                        number,
-                    });
-                    s.show_invite_overlay = true;
-                }
-                Screen::MainMenu(s) => {
-                    s.pending_invites.push(PendingInviteInfo {
-                        from_peer,
-                        from_display: from_nickname,
-                        room_name,
-                        number,
-                    });
-                    s.show_invite_overlay = true;
-                }
-                _ => {}
+        AppEvent::InviteReceived { from_nickname, room_name, number, from_peer: _ } => {
+            if let Screen::Chat(s) = screen {
+                use crate::room::RoomStore;
+                let msg = format!(
+                    "[초대] {}가 {} 으로 초대했습니다  (/approve {} 수락  /reject {} 거절)",
+                    from_nickname, room_name, number, number
+                );
+                s.feed.push(FeedItem {
+                    timestamp_ms: RoomStore::now_ms(),
+                    content: FeedContent::Invite(msg),
+                });
+                s.feed_scroll = s.feed.len().saturating_sub(1);
             }
         }
 

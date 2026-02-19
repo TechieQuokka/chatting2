@@ -11,6 +11,8 @@ pub enum Command {
     Nick { nickname: String },
     Invite,
     Accept { number: Option<u32> },
+    Approve { number: Option<u32> },
+    Reject { number: Option<u32> },
     Help,
 
     // ── 파일 공유 ─────────────────────────────────────────────────────────────
@@ -93,6 +95,14 @@ pub fn parse(input: &str) -> Result<Command, ParseError> {
         "accept" => {
             let number = rest.first().copied().and_then(|s| s.trim().parse::<u32>().ok());
             Ok(Command::Accept { number })
+        }
+        "approve" => {
+            let number = rest.first().copied().and_then(|s| s.trim().parse::<u32>().ok());
+            Ok(Command::Approve { number })
+        }
+        "reject" => {
+            let number = rest.first().copied().and_then(|s| s.trim().parse::<u32>().ok());
+            Ok(Command::Reject { number })
         }
         "share" => {
             let path = rest.join(" ").trim().to_string();

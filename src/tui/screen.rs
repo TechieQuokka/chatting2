@@ -1,5 +1,3 @@
-use libp2p::PeerId;
-
 use crate::room::RoomLifetime;
 use crate::transfer::DownloadStatus;
 
@@ -99,17 +97,6 @@ pub enum DeleteField {
 #[derive(Debug, Default)]
 pub struct MainMenuState {
     pub nickname: String,
-    pub pending_invites: Vec<PendingInviteInfo>,
-    pub show_invite_overlay: bool,
-    pub invite_cursor: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct PendingInviteInfo {
-    pub from_peer: PeerId,
-    pub from_display: String,
-    pub room_name: String,
-    pub number: u32,
 }
 
 // ── 방 목록 화면 ─────────────────────────────────────────────────────────────
@@ -294,10 +281,6 @@ pub struct ChatState {
     /// 활성 다운로드 요약 (최대 3개 표시).
     pub active_downloads: Vec<DownloadSummary>,
 
-    /// 피드 내 대기 중인 초대 목록.
-    pub pending_invites: Vec<PendingInviteInfo>,
-    pub show_invite_overlay: bool,
-    pub invite_cursor: usize,
 }
 
 /// 피드에 표시되는 항목.

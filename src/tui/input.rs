@@ -197,34 +197,7 @@ fn handle_delete_account(s: &mut DeleteAccountState, key: KeyEvent) -> TuiAction
 
 // ── 메인 메뉴 ─────────────────────────────────────────────────────────────────
 
-fn handle_main_menu(s: &mut MainMenuState, key: KeyEvent) -> TuiAction {
-    // 초대 오버레이가 열려 있는 경우
-    if s.show_invite_overlay && !s.pending_invites.is_empty() {
-        match key.code {
-            KeyCode::Up => {
-                if s.invite_cursor > 0 { s.invite_cursor -= 1; }
-            }
-            KeyCode::Down => {
-                if s.invite_cursor + 1 < s.pending_invites.len() {
-                    s.invite_cursor += 1;
-                }
-            }
-            KeyCode::Enter => {
-                let number = s.pending_invites[s.invite_cursor].number;
-                return TuiAction::Command(AppCommand::AcceptInvite { number: Some(number) });
-            }
-            KeyCode::Char('d') | KeyCode::Char('D') => {
-                let number = s.pending_invites[s.invite_cursor].number;
-                return TuiAction::Command(AppCommand::DeclineInvite { number: Some(number) });
-            }
-            KeyCode::Esc => {
-                s.show_invite_overlay = false;
-            }
-            _ => {}
-        }
-        return TuiAction::None;
-    }
-
+fn handle_main_menu(_s: &mut MainMenuState, key: KeyEvent) -> TuiAction {
     match key.code {
         KeyCode::Char('1') => {
             return TuiAction::Goto(Screen::CreateRoom(CreateRoomState::default()));
@@ -812,43 +785,6 @@ fn handle_file_select(s: &mut FileSelectState, key: KeyEvent) -> TuiAction {
 // ── 채팅/파일 화면 ────────────────────────────────────────────────────────────
 
 fn handle_chat(s: &mut ChatState, key: KeyEvent) -> TuiAction {
-    // 초대 오버레이가 열려 있는 경우 먼저 처리
-    if s.show_invite_overlay && !s.pending_invites.is_empty() {
-        match key.code {
-            KeyCode::Up => {
-                if s.invite_cursor > 0 { s.invite_cursor -= 1; }
-            }
-            KeyCode::Down => {
-                if s.invite_cursor + 1 < s.pending_invites.len() {
-                    s.invite_cursor += 1;
-                }
-            }
-            KeyCode::Enter => {
-                let number = s.pending_invites[s.invite_cursor].number;
-                s.pending_invites.remove(s.invite_cursor);
-                if s.pending_invites.is_empty() { s.show_invite_overlay = false; }
-                if s.invite_cursor > 0 && s.invite_cursor >= s.pending_invites.len() {
-                    s.invite_cursor -= 1;
-                }
-                return TuiAction::Command(AppCommand::AcceptInvite { number: Some(number) });
-            }
-            KeyCode::Char('d') | KeyCode::Char('D') => {
-                let number = s.pending_invites[s.invite_cursor].number;
-                s.pending_invites.remove(s.invite_cursor);
-                if s.pending_invites.is_empty() { s.show_invite_overlay = false; }
-                if s.invite_cursor > 0 && s.invite_cursor >= s.pending_invites.len() {
-                    s.invite_cursor -= 1;
-                }
-                return TuiAction::Command(AppCommand::DeclineInvite { number: Some(number) });
-            }
-            KeyCode::Esc => {
-                s.show_invite_overlay = false;
-            }
-            _ => {}
-        }
-        return TuiAction::None;
-    }
-
     // Ctrl+C → 방 나가기
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return TuiAction::CommandAndGoto(
@@ -963,8 +899,11 @@ fn parse_chat_command(text: String, s: &mut ChatState) -> TuiAction {
         Ok(Command::Nick { nickname }) => {
             return TuiAction::Command(AppCommand::ChangeNickname { new_nickname: nickname });
         }
-        Ok(Command::Accept { number }) => {
+        Ok(Command::Accept { number }) | Ok(Command::Approve { number }) => {
             return TuiAction::Command(AppCommand::AcceptInvite { number });
+        }
+        Ok(Command::Reject { number }) => {
+            return TuiAction::Command(AppCommand::DeclineInvite { number });
         }
         Ok(Command::Message { text }) => {
             return TuiAction::Command(AppCommand::SendMessage { text });
@@ -979,7 +918,8 @@ fn parse_chat_command(text: String, s: &mut ChatState) -> TuiAction {
                 "  /peers             접속 중인 피어 목록 표시",
                 "  /nick <닉네임>     닉네임 변경",
                 "  /invite            초대 코드 생성",
-                "  /accept [번호]     초대 수락 (번호 생략 시 첫 번째)",
+                "  /approve [번호]    초대 수락 (/accept 도 동일)",
+                "  /reject [번호]     초대 거절",
                 " 파일 공유",
                 "  /share <경로>      파일 또는 폴더 공유 등록",
                 "  /list              이 방의 공유 파일 목록 표시",

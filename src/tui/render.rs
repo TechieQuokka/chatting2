@@ -305,43 +305,6 @@ fn render_main_menu(frame: &mut Frame, state: &MainMenuState, lang: Lang) {
         frame.render_widget(Paragraph::new(item.as_str()), chunks[2 + i]);
     }
 
-    if state.show_invite_overlay && !state.pending_invites.is_empty() {
-        render_invite_overlay(frame, &state.pending_invites, state.invite_cursor, lang);
-    }
-}
-
-fn render_invite_overlay(frame: &mut Frame, invites: &[PendingInviteInfo], cursor: usize, lang: Lang) {
-    let title = if lang == Lang::English {
-        format!(" Invites ({}) ", invites.len())
-    } else {
-        format!(" 초대 알림 ({건}) ", 건 = invites.len())
-    };
-    let area = center_rect(48, 12, frame.area());
-    let block = Block::default().borders(Borders::ALL).title(title.as_str());
-    frame.render_widget(block, area);
-
-    let inner = Rect::new(area.x + 2, area.y + 1, area.width - 4, area.height - 2);
-
-    let items: Vec<ListItem> = invites
-        .iter()
-        .enumerate()
-        .map(|(i, inv)| {
-            let marker = if i == cursor { "▶" } else { " " };
-            ListItem::new(Line::from(vec![
-                Span::raw(format!("{marker} {}. {} → {}", i + 1, inv.from_display, inv.room_name)),
-            ]))
-        })
-        .collect();
-
-    let list = List::new(items);
-    let list_rect = Rect::new(inner.x, inner.y, inner.width, inner.height - 1);
-    frame.render_widget(list, list_rect);
-
-    let hint_rect = Rect::new(inner.x, inner.y + inner.height - 1, inner.width, 1);
-    frame.render_widget(
-        Paragraph::new(t(lang, Key::HintAcceptRejectLater)),
-        hint_rect,
-    );
 }
 
 // ── 방 목록 화면 ─────────────────────────────────────────────────────────────
@@ -976,10 +939,6 @@ fn render_chat(frame: &mut Frame, state: &ChatState, lang: Lang) {
         chunks[3],
     );
 
-    // 초대 오버레이
-    if state.show_invite_overlay && !state.pending_invites.is_empty() {
-        render_invite_overlay(frame, &state.pending_invites, state.invite_cursor, lang);
-    }
 }
 
 fn feed_item_to_line(item: &FeedItem) -> Line<'static> {
