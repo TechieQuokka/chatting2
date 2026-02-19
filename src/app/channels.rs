@@ -30,7 +30,10 @@ pub enum AppCommand {
 
     // ── 초대 ─────────────────────────────────────────────────────────────────
     GenerateInviteCode,
-    EnterInviteCode { url: String, code: String },
+    /// URL(초대자의 user_id)로 DHT 조회 → 방 목록 수신.
+    LookupRoomUrl { url: String },
+    /// 초대 코드 입력 → DHT 조회 → InviteRequest 전송.
+    EnterInviteCode { code: String },
     AcceptInvite { number: Option<u32> },
     DeclineInvite { number: Option<u32> },
     /// mDNS 탐색 목록에서 피어를 직접 초대 (인트라넷 모드).
@@ -111,6 +114,10 @@ pub enum AppEvent {
     InviteReceived { from_peer: PeerId, from_nickname: String, room_name: String, number: u32 },
     InviteDecision { accepted: bool, by_peer: PeerId },
     InviteExpired,
+    /// URL DHT 조회 성공 — 방 목록 (room_id, identifier).
+    UrlRooms { rooms: Vec<([u8; 32], String)> },
+    /// URL DHT 조회 실패 — URL에 해당하는 방 없음.
+    UrlNotFound,
 
     // ── mDNS 피어 목록 (인트라넷 초대용) ─────────────────────────────────────
     /// mDNS로 발견된 로컬 네트워크 피어 목록 갱신.

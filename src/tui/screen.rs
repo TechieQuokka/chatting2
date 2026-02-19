@@ -179,6 +179,8 @@ pub struct InviteEntryState {
 pub enum InviteStep {
     #[default]
     UrlInput,
+    /// URL DHT 조회 중 (결과 대기).
+    UrlLookingUp,
     RoomSelect,
     CodeInput,
     Waiting,

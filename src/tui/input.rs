@@ -386,14 +386,27 @@ fn handle_invite_entry(s: &mut InviteEntryState, key: KeyEvent) -> TuiAction {
             KeyCode::Backspace => { pop_char(&mut s.url_input); }
             KeyCode::Char(c) => { push_char(&mut s.url_input, c); }
             KeyCode::Enter => {
-                // 빈 URL도 허용 — 이미 연결된 피어나 mDNS 탐색 피어 대상으로 코드만 입력
-                s.step = InviteStep::CodeInput;
+                if s.url_input.is_empty() {
+                    // URL 없이 코드만 입력 (이미 연결된 피어 대상)
+                    s.step = InviteStep::CodeInput;
+                } else {
+                    // URL DHT 조회 시작
+                    let url = s.url_input.clone();
+                    s.step = InviteStep::UrlLookingUp;
+                    return TuiAction::Command(AppCommand::LookupRoomUrl { url });
+                }
             }
             KeyCode::Esc => {
                 return TuiAction::Goto(Screen::MainMenu(MainMenuState::default()));
             }
             _ => {}
         },
+        InviteStep::UrlLookingUp => {
+            // 조회 결과 대기 중 — Esc로만 취소
+            if key.code == KeyCode::Esc {
+                s.step = InviteStep::UrlInput;
+            }
+        }
         InviteStep::RoomSelect => match key.code {
             KeyCode::Up => {
                 if s.room_cursor > 0 { s.room_cursor -= 1; }
@@ -417,10 +430,9 @@ fn handle_invite_entry(s: &mut InviteEntryState, key: KeyEvent) -> TuiAction {
             KeyCode::Char(c) => { push_char(&mut s.code_input, c); }
             KeyCode::Enter => {
                 if !s.code_input.is_empty() {
-                    let url = s.url_input.clone();
                     let code = s.code_input.clone().to_uppercase();
                     s.step = InviteStep::Waiting;
-                    return TuiAction::Command(AppCommand::EnterInviteCode { url, code });
+                    return TuiAction::Command(AppCommand::EnterInviteCode { code });
                 }
             }
             KeyCode::Esc => {

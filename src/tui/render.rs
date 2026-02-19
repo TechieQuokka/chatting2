@@ -484,14 +484,15 @@ fn render_invite_entry(frame: &mut Frame, state: &InviteEntryState, lang: Lang) 
 
     match &state.step {
         InviteStep::UrlInput => {
+            let url_field_lbl = if lang == Lang::English { "Inviter's ID" } else { "초대자 ID" };
             frame.render_widget(
-                Paragraph::new(format!("{url_lbl} : [{}]", state.url_input)),
+                Paragraph::new(format!("{url_field_lbl} : [{}]", state.url_input)),
                 Rect::new(inner.x, inner.y, inner.width, 1),
             );
             let hint = if lang == Lang::English {
-                "e.g. 192.168.1.1:40000  (empty = skip)"
+                "e.g. alice  (empty = skip, code-only)"
             } else {
-                "예: 192.168.1.1:40000  (비우면 건너뜀)"
+                "예: alice  (비우면 건너뜀, 코드만 입력)"
             };
             frame.render_widget(
                 Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))),
@@ -500,6 +501,26 @@ fn render_invite_entry(frame: &mut Frame, state: &InviteEntryState, lang: Lang) 
             frame.render_widget(
                 Paragraph::new(enter_confirm),
                 Rect::new(inner.x, inner.y + 3, inner.width, 1),
+            );
+        }
+        InviteStep::UrlLookingUp => {
+            let looking_lbl = if lang == Lang::English {
+                "Looking up rooms..."
+            } else {
+                "방 목록 조회 중..."
+            };
+            frame.render_widget(
+                Paragraph::new(Span::styled(format!("[ {} ]", state.url_input), Style::default().fg(Color::Yellow))),
+                Rect::new(inner.x, inner.y, inner.width, 1),
+            );
+            frame.render_widget(
+                Paragraph::new(looking_lbl),
+                Rect::new(inner.x, inner.y + 2, inner.width, 1),
+            );
+            let esc_cancel = if lang == Lang::English { "Esc Cancel" } else { "Esc 취소" };
+            frame.render_widget(
+                Paragraph::new(esc_cancel),
+                Rect::new(inner.x, inner.y + 4, inner.width, 1),
             );
         }
         InviteStep::RoomSelect => {

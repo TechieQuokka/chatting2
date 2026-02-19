@@ -521,6 +521,27 @@ fn handle_app_event(screen: &mut Screen, event: AppEvent) {
             }
         }
 
+        AppEvent::UrlRooms { rooms } => {
+            if let Screen::InviteEntry(s) = screen {
+                if rooms.len() == 1 {
+                    s.selected_room = Some(rooms[0].0);
+                    s.step = InviteStep::CodeInput;
+                } else {
+                    s.room_candidates = rooms;
+                    s.room_cursor = 0;
+                    s.step = InviteStep::RoomSelect;
+                }
+            }
+        }
+
+        AppEvent::UrlNotFound => {
+            if let Screen::InviteEntry(s) = screen {
+                s.step = InviteStep::Failed(
+                    format!("'{}' 을(를) 찾을 수 없습니다.\n상대방이 초대 코드를 먼저 생성해야 합니다.", s.url_input)
+                );
+            }
+        }
+
         AppEvent::Error(msg) => {
             if let Screen::InviteEntry(s) = screen {
                 s.step = InviteStep::Failed(msg);

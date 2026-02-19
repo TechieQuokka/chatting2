@@ -82,6 +82,8 @@ pub struct AppCore {
     pending_invite_channels: HashMap<u32, (PeerId, request_response::ResponseChannel<AppResponse>)>,
     /// 다음 초대 번호 (단조 증가).
     invite_counter: u32,
+    /// DHT 조회 중인 URL (KadGetRecordResult 처리용, URL 방 목록 조회).
+    pending_url_lookup: Option<String>,
     /// DHT 조회 중인 초대 코드 (KadGetRecordResult 처리용).
     pending_invite_code: Option<String>,
     /// 피초대자 측: InviteRequest 전송 후 InviteAccepted 대기 중인 방 ID.
@@ -129,6 +131,7 @@ impl AppCore {
             invite_manager: InviteManager::default(),
             pending_invite_channels: HashMap::new(),
             invite_counter: 0,
+            pending_url_lookup: None,
             pending_invite_code: None,
             pending_invite_room_id: None,
             peer_bitfields: PeerBitfields::default(),
@@ -172,10 +175,23 @@ impl AppCore {
                     } else {
                         // mDNS 이벤트 먼저 처리 (AppCore 내부 상태 갱신)
                         self.preprocess_network_event(&event).await;
-                        // KadGetRecordResult: 초대 코드 조회 결과 처리
-                        if let NetworkEvent::KadGetRecordResult { result: Ok(ref bytes), .. } = event {
-                            let bytes = bytes.clone();
-                            self.handle_invite_dht_result(bytes).await;
+                        // KadGetRecordResult: URL 방 목록 조회 또는 초대 코드 조회 처리
+                        if let NetworkEvent::KadGetRecordResult { ref result, .. } = event {
+                            if self.pending_url_lookup.is_some() {
+                                match result {
+                                    Ok(bytes) => {
+                                        let bytes = bytes.clone();
+                                        self.handle_url_dht_result(bytes).await;
+                                    }
+                                    Err(_) => {
+                                        self.pending_url_lookup.take();
+                                        self.app_tx.send(AppEvent::UrlNotFound).await.ok();
+                                    }
+                                }
+                            } else if let Ok(bytes) = result {
+                                let bytes = bytes.clone();
+                                self.handle_invite_dht_result(bytes).await;
+                            }
                         } else if let NetworkEvent::KadGetProvidersResult { ref key, ref providers } = event {
                             // 방 입장 시 동기화: 각 Provider에게 BitfieldRequest 전송
                             // 방 목록 배경 조회: RoomPeerCount 이벤트 emit
@@ -387,8 +403,12 @@ impl AppCore {
                 self.generate_invite_code().await;
             }
 
-            AppCommand::EnterInviteCode { url, code } => {
-                self.enter_invite_code(url, code).await;
+            AppCommand::LookupRoomUrl { url } => {
+                self.lookup_room_url(url).await;
+            }
+
+            AppCommand::EnterInviteCode { code } => {
+                self.enter_invite_code(code).await;
             }
 
             AppCommand::AcceptInvite { number } => {
@@ -927,6 +947,24 @@ impl AppCore {
                             key: dht_key,
                             value: bytes,
                         }).await.ok();
+
+                        // URL 레코드 등록: user_id → 전체 방 목록
+                        // 피초대자가 user_id를 URL로 입력해 방 목록을 조회할 수 있다.
+                        let url_key = crate::invite::hash_url(&self.user_id).to_vec();
+                        let url_entries: Vec<crate::invite::UrlRoomEntry> = self.room_store.all()
+                            .iter()
+                            .map(|r| crate::invite::UrlRoomEntry {
+                                room_id: r.room_id,
+                                identifier: r.name.clone(),
+                            })
+                            .collect();
+                        if let Ok(url_bytes) = crate::invite::encode_url_record(&url_entries) {
+                            self.net_tx.send(crate::network::event::NetworkCommand::PutRecord {
+                                key: url_key,
+                                value: url_bytes,
+                            }).await.ok();
+                        }
+
                         self.app_tx.send(AppEvent::InviteCodeGenerated { code }).await.ok();
                     }
                     Err(e) => {
@@ -940,32 +978,38 @@ impl AppCore {
         }
     }
 
-    async fn enter_invite_code(&mut self, url: String, code: String) {
-        // 먼저 제공된 URL로 피어에 직접 다이얼 시도
-        // IP:PORT 단축 형식과 Multiaddr 전체 형식 모두 지원
-        if !url.is_empty() {
-            let addr_opt: Option<libp2p::Multiaddr> = if url.starts_with('/') {
-                url.parse().ok()
-            } else if let Some((host, port)) = url.split_once(':') {
-                format!("/ip4/{host}/tcp/{port}").parse().ok()
-                    .or_else(|| format!("/dns4/{host}/tcp/{port}").parse().ok())
-            } else {
-                None
-            };
+    /// URL(초대자 user_id)로 DHT 방 목록 조회.
+    async fn lookup_room_url(&mut self, url: String) {
+        let url_key = crate::invite::hash_url(&url).to_vec();
+        self.pending_url_lookup = Some(url.clone());
+        self.net_tx.send(crate::network::event::NetworkCommand::GetRecord {
+            key: url_key,
+        }).await.ok();
+        self.app_tx.send(AppEvent::Notice(format!("'{}' 조회 중...", url))).await.ok();
+    }
 
-            match addr_opt {
-                Some(addr) => {
-                    self.net_tx.send(crate::network::event::NetworkCommand::DialPeer { addr }).await.ok();
-                }
-                None => {
-                    self.app_tx.send(AppEvent::Notice(
-                        format!("주소 형식 오류: '{url}' — 올바른 형식: 192.168.1.1:40000")
-                    )).await.ok();
-                    // URL이 잘못되어도 DHT 조회는 계속 진행
-                }
+    /// URL DHT 조회 결과 처리.
+    async fn handle_url_dht_result(&mut self, bytes: Vec<u8>) {
+        self.pending_url_lookup.take();
+        let rooms = match crate::invite::decode_url_record(&bytes) {
+            Ok(r) => r,
+            Err(_) => {
+                self.app_tx.send(AppEvent::UrlNotFound).await.ok();
+                return;
             }
+        };
+        if rooms.is_empty() {
+            self.app_tx.send(AppEvent::UrlNotFound).await.ok();
+            return;
         }
-        // DHT에서 초대 레코드 조회
+        let rooms: Vec<([u8; 32], String)> = rooms.into_iter()
+            .map(|r| (r.room_id, r.identifier))
+            .collect();
+        self.app_tx.send(AppEvent::UrlRooms { rooms }).await.ok();
+    }
+
+    /// 초대 코드 DHT 조회 → InviteRequest 전송.
+    async fn enter_invite_code(&mut self, code: String) {
         let dht_key = crate::invite::hash_code(&code).to_vec();
         self.pending_invite_code = Some(code.clone());
         self.net_tx.send(crate::network::event::NetworkCommand::GetRecord {
