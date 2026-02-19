@@ -469,100 +469,129 @@ fn render_create_room(frame: &mut Frame, state: &CreateRoomState, lang: Lang) {
 
 fn render_invite_entry(frame: &mut Frame, state: &InviteEntryState, lang: Lang) {
     let title = format!(" {} ", t(lang, Key::JoinByInvite));
-    let area = center_rect(46, 12, frame.area());
+    // 너비 58, 높이 14 — 긴 오류 메시지와 한국어 텍스트를 수용
+    let area = center_rect(58, 14, frame.area());
     let block = Block::default().borders(Borders::ALL).title(title.as_str());
     frame.render_widget(block, area);
 
+    // 좌우 2칸, 상하 1칸 여백
     let inner = Rect::new(area.x + 2, area.y + 1, area.width - 4, area.height - 2);
-    let enter_confirm = if lang == Lang::English { "Enter Confirm  Esc Cancel" } else { "Enter 확인  Esc 취소" };
-    let _enter_connect = if lang == Lang::English { "Enter Connect  Esc Cancel" } else { "Enter 연결  Esc 취소" };
-    let enter_retry = if lang == Lang::English { "Enter Retry  Esc Cancel" } else { "Enter 다시 시도  Esc 취소" };
-    let code_lbl = t(lang, Key::InviteCode);
-    let url_lbl = if lang == Lang::English { "Room URL" } else { "방 URL" };
-    let waiting_lbl = if lang == Lang::English { "Waiting for approval... (remaining: {}s)" } else { "승인 대기 중... (남은 시간 :{}s)" };
-    let fail_lbl = if lang == Lang::English { "! Connection failed ({})" } else { "! 연결 실패 ({})" };
+
+    // ── 공통 레이블 ──────────────────────────────────────────────────────────
+    let enter_confirm = if lang == Lang::English { "Enter: Confirm  |  Esc: Cancel"  } else { "Enter: 확인  |  Esc: 취소" };
+    let esc_cancel    = if lang == Lang::English { "Esc: Cancel"                     } else { "Esc: 취소" };
+    let esc_back      = if lang == Lang::English { "Enter: Connect  |  Esc: Back"    } else { "Enter: 연결  |  Esc: 뒤로" };
+    let enter_retry   = if lang == Lang::English { "Enter: Retry  |  Esc: Cancel"    } else { "Enter: 다시 시도  |  Esc: 취소" };
+    let code_lbl      = t(lang, Key::InviteCode);
+
+    // 하단 구분선 y 위치 (inner 영역 마지막 줄)
+    let bottom = inner.y + inner.height.saturating_sub(1);
 
     match &state.step {
         InviteStep::UrlInput => {
-            let url_field_lbl = if lang == Lang::English { "Inviter's ID" } else { "초대자 ID" };
+            let lbl = if lang == Lang::English { "Inviter's ID" } else { "초대자 ID" };
+            let hint = if lang == Lang::English {
+                "e.g. alice  (leave empty to skip)"
+            } else {
+                "예: alice  (비우면 건너뜀)"
+            };
             frame.render_widget(
-                Paragraph::new(format!("{url_field_lbl} : [{}]", state.url_input)),
+                Paragraph::new(format!("{lbl} : [{}]", state.url_input)),
                 Rect::new(inner.x, inner.y, inner.width, 1),
             );
-            let hint = if lang == Lang::English {
-                "e.g. alice  (empty = skip, code-only)"
-            } else {
-                "예: alice  (비우면 건너뜀, 코드만 입력)"
-            };
             frame.render_widget(
                 Paragraph::new(Span::styled(hint, Style::default().fg(Color::DarkGray))),
                 Rect::new(inner.x, inner.y + 1, inner.width, 1),
             );
             frame.render_widget(
                 Paragraph::new(enter_confirm),
-                Rect::new(inner.x, inner.y + 3, inner.width, 1),
+                Rect::new(inner.x, bottom, inner.width, 1),
             );
         }
         InviteStep::UrlLookingUp => {
-            let looking_lbl = if lang == Lang::English {
-                "Looking up rooms..."
-            } else {
-                "방 목록 조회 중..."
-            };
+            let lbl = if lang == Lang::English { "Looking up rooms..." } else { "방 목록 조회 중..." };
             frame.render_widget(
-                Paragraph::new(Span::styled(format!("[ {} ]", state.url_input), Style::default().fg(Color::Yellow))),
+                Paragraph::new(Span::styled(
+                    format!("ID: {}", state.url_input),
+                    Style::default().fg(Color::Yellow),
+                )),
                 Rect::new(inner.x, inner.y, inner.width, 1),
             );
             frame.render_widget(
-                Paragraph::new(looking_lbl),
+                Paragraph::new(lbl),
                 Rect::new(inner.x, inner.y + 2, inner.width, 1),
             );
-            let esc_cancel = if lang == Lang::English { "Esc Cancel" } else { "Esc 취소" };
             frame.render_widget(
                 Paragraph::new(esc_cancel),
-                Rect::new(inner.x, inner.y + 4, inner.width, 1),
+                Rect::new(inner.x, bottom, inner.width, 1),
             );
         }
         InviteStep::RoomSelect => {
+            let select_lbl = if lang == Lang::English { "Select a room:" } else { "방을 선택하세요:" };
+            frame.render_widget(
+                Paragraph::new(select_lbl),
+                Rect::new(inner.x, inner.y, inner.width, 1),
+            );
+            let list_area = Rect::new(inner.x, inner.y + 2, inner.width, inner.height.saturating_sub(4));
             let items: Vec<ListItem> = state.room_candidates.iter().enumerate().map(|(i, (id, ident))| {
                 let marker = if i == state.room_cursor { "▶" } else { " " };
                 let id_hex: String = id.iter().take(4).map(|b| format!("{b:02x}")).collect();
-                ListItem::new(format!("{marker} [{id_hex}]  #{ident}"))
+                ListItem::new(format!("{marker} [{id_hex}]  {ident}"))
             }).collect();
-            frame.render_widget(List::new(items), inner);
+            frame.render_widget(List::new(items), list_area);
+            frame.render_widget(
+                Paragraph::new(esc_back),
+                Rect::new(inner.x, bottom, inner.width, 1),
+            );
         }
         InviteStep::CodeInput => {
+            let id_lbl = if lang == Lang::English { "Inviter's ID" } else { "초대자 ID" };
             frame.render_widget(
-                Paragraph::new(format!("{url_lbl} : {}", state.url_input)),
+                Paragraph::new(format!("{id_lbl} : {}", state.url_input)),
                 Rect::new(inner.x, inner.y, inner.width, 1),
             );
             frame.render_widget(
                 Paragraph::new(format!("{code_lbl} : [{}]", state.code_input)),
                 Rect::new(inner.x, inner.y + 2, inner.width, 1),
             );
-            let esc_back = if lang == Lang::English { "Enter Connect  Esc Back" } else { "Enter 연결  Esc 뒤로" };
             frame.render_widget(
                 Paragraph::new(esc_back),
-                Rect::new(inner.x, inner.y + 4, inner.width, 1),
+                Rect::new(inner.x, bottom, inner.width, 1),
             );
         }
         InviteStep::Waiting => {
             let secs = state.ttl_remaining_ms / 1000;
-            let msg = waiting_lbl.replace("{}", &secs.to_string()).replace("{}s", &format!("{secs}s"));
+            let msg = if lang == Lang::English {
+                format!("Waiting for approval...  (TTL: {secs}s)")
+            } else {
+                format!("승인 대기 중...  (남은 시간: {secs}s)")
+            };
             frame.render_widget(
                 Paragraph::new(msg),
-                Rect::new(inner.x, inner.y + 1, inner.width, 1),
+                Rect::new(inner.x, inner.y + 2, inner.width, 1),
+            );
+            frame.render_widget(
+                Paragraph::new(esc_cancel),
+                Rect::new(inner.x, bottom, inner.width, 1),
             );
         }
         InviteStep::Failed(reason) => {
-            let msg = fail_lbl.replace("{}", reason);
+            let prefix = if lang == Lang::English { "Connection failed:" } else { "연결 실패:" };
+            // 오류 메시지를 여러 줄로 표시 (Wrap 사용)
+            let msg_area = Rect::new(inner.x, inner.y + 1, inner.width, inner.height.saturating_sub(4));
             frame.render_widget(
-                Paragraph::new(Span::styled(msg, Style::default().fg(Color::Red))),
-                Rect::new(inner.x, inner.y + 1, inner.width, 1),
+                Paragraph::new(Span::styled(prefix, Style::default().fg(Color::Red))),
+                Rect::new(inner.x, inner.y, inner.width, 1),
+            );
+            frame.render_widget(
+                Paragraph::new(reason.as_str())
+                    .style(Style::default().fg(Color::Red))
+                    .wrap(Wrap { trim: false }),
+                msg_area,
             );
             frame.render_widget(
                 Paragraph::new(enter_retry),
-                Rect::new(inner.x, inner.y + 3, inner.width, 1),
+                Rect::new(inner.x, bottom, inner.width, 1),
             );
         }
     }
