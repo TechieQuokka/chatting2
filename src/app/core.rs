@@ -714,6 +714,10 @@ impl AppCore {
             .await
             .ok();
 
+        // URL 레코드 갱신: user_id → 전체 방 목록 PUT
+        // 방 입장 시마다 등록해 피초대자가 user_id로 방을 탐색할 수 있게 한다.
+        self.put_url_record().await;
+
         // 05-room.md: 방 입장 시 동기화 — 기존 피어들에게 BitfieldRequest 전송
         self.net_tx
             .send(NetworkCommand::GetProviders { key: room_id.to_vec() })
@@ -948,24 +952,10 @@ impl AppCore {
                             value: bytes,
                         }).await.ok();
 
-                        // URL 레코드 등록: user_id → 전체 방 목록
-                        // 피초대자가 user_id를 URL로 입력해 방 목록을 조회할 수 있다.
-                        let url_key = crate::invite::hash_url(&self.user_id).to_vec();
-                        let url_entries: Vec<crate::invite::UrlRoomEntry> = self.room_store.all()
-                            .iter()
-                            .map(|r| crate::invite::UrlRoomEntry {
-                                room_id: r.room_id,
-                                identifier: r.name.clone(),
-                            })
-                            .collect();
-                        if let Ok(url_bytes) = crate::invite::encode_url_record(&url_entries) {
-                            self.net_tx.send(crate::network::event::NetworkCommand::PutRecord {
-                                key: url_key,
-                                value: url_bytes,
-                            }).await.ok();
-                        }
+                        // URL 레코드 갱신 (방 목록 등록)
+                        self.put_url_record().await;
 
-                        self.app_tx.send(AppEvent::InviteCodeGenerated { code }).await.ok();
+                        self.app_tx.send(AppEvent::InviteCodeGenerated { code, my_id: self.user_id.clone() }).await.ok();
                     }
                     Err(e) => {
                         self.app_tx.send(AppEvent::Error(format!("초대 코드 직렬화 실패: {e}"))).await.ok();
@@ -975,6 +965,26 @@ impl AppCore {
             Err(e) => {
                 self.app_tx.send(AppEvent::Error(format!("초대 코드 생성 실패: {e}"))).await.ok();
             }
+        }
+    }
+
+    /// user_id → 전체 방 목록을 DHT에 PUT한다.
+    ///
+    /// 방 입장 시 및 초대 코드 생성 시 호출되어 피초대자가 user_id로 방을 탐색할 수 있게 한다.
+    async fn put_url_record(&mut self) {
+        let url_key = crate::invite::hash_url(&self.user_id).to_vec();
+        let url_entries: Vec<crate::invite::UrlRoomEntry> = self.room_store.all()
+            .iter()
+            .map(|r| crate::invite::UrlRoomEntry {
+                room_id: r.room_id,
+                identifier: r.name.clone(),
+            })
+            .collect();
+        if let Ok(url_bytes) = crate::invite::encode_url_record(&url_entries) {
+            self.net_tx.send(crate::network::event::NetworkCommand::PutRecord {
+                key: url_key,
+                value: url_bytes,
+            }).await.ok();
         }
     }
 

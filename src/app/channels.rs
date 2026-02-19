@@ -110,7 +110,7 @@ pub enum AppEvent {
     DownloadComplete { file_hash: [u8; 32], file_name: String },
 
     // ── 초대 이벤트 ───────────────────────────────────────────────────────────
-    InviteCodeGenerated { code: String },
+    InviteCodeGenerated { code: String, my_id: String },
     InviteReceived { from_peer: PeerId, from_nickname: String, room_name: String, number: u32 },
     InviteDecision { accepted: bool, by_peer: PeerId },
     InviteExpired,

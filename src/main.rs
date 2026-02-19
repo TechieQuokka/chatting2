@@ -475,12 +475,14 @@ fn handle_app_event(screen: &mut Screen, event: AppEvent) {
             }
         }
 
-        AppEvent::InviteCodeGenerated { code } => {
+        AppEvent::InviteCodeGenerated { code, my_id } => {
             if let Screen::Chat(s) = screen {
                 use crate::room::RoomStore;
                 s.feed.push(FeedItem {
                     timestamp_ms: RoomStore::now_ms(),
-                    content: FeedContent::System(format!("[초대 코드] {code} (3분간 유효)")),
+                    content: FeedContent::System(
+                        format!("[초대 코드] {code}  |  내 ID: {my_id}  (3분간 유효)")
+                    ),
                 });
             }
         }
