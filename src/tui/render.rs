@@ -12,7 +12,7 @@ const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ── 라우터 ───────────────────────────────────────────────────────────────────
 
-pub fn render(frame: &mut Frame, screen: &Screen, lang: Lang) {
+pub fn render(frame: &mut Frame, screen: &mut Screen, lang: Lang) {
     match screen {
         Screen::Welcome(s) => render_welcome(frame, s, lang),
         Screen::Login(s) => render_login(frame, s, lang),
@@ -851,7 +851,7 @@ fn render_file_select(frame: &mut Frame, state: &FileSelectState, lang: Lang) {
 
 // ── 채팅/파일 화면 ────────────────────────────────────────────────────────────
 
-fn render_chat(frame: &mut Frame, state: &ChatState, lang: Lang) {
+fn render_chat(frame: &mut Frame, state: &mut ChatState, lang: Lang) {
     let area = frame.area();
 
     let chunks = Layout::default()
@@ -927,6 +927,8 @@ fn render_chat(frame: &mut Frame, state: &ChatState, lang: Lang) {
     } else {
         0
     };
+    // feed_scroll을 항상 유효 범위로 클램핑 — 초과 누적 방지
+    state.feed_scroll = scroll_offset;
 
     let visible_feed: Vec<Line> = state.feed.iter()
         .skip(scroll_offset)

@@ -186,7 +186,7 @@ async fn run_pre_login(
 
     loop {
         // 로그인 전은 항상 한국어
-        terminal.draw(|f| render(f, &screen, Lang::Korean)).ok();
+        terminal.draw(|f| render(f, &mut screen, Lang::Korean)).ok();
 
         // 키 입력 대기 (100ms 타임아웃)
         if !event::poll(Duration::from_millis(100)).unwrap_or(false) {
@@ -327,7 +327,7 @@ async fn run_tui_loop(
         if let Screen::MainMenu(s) = &mut screen {
             s.invite_badge = invite_queue.len();
         }
-        terminal.draw(|f| render(f, &screen, lang)).ok();
+        terminal.draw(|f| render(f, &mut screen, lang)).ok();
 
         // InviteEntry TTL 카운트다운 갱신
         if let Screen::InviteEntry(s) = &mut screen {
