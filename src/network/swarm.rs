@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use libp2p::{
-    kad, noise,
+    kad, mdns, noise,
     swarm::SwarmEvent,
     tcp, yamux, Multiaddr, Swarm,
 };
@@ -91,10 +91,12 @@ pub async fn run_event_loop(
             swarm.behaviour_mut().kademlia.bootstrap().ok();
         }
         NetworkMode::Intranet => {
+            // 인트라넷에서도 DHT 레코드를 서빙해야 하므로 Server 모드 사용.
+            // Client 모드에서는 PutRecord한 레코드를 다른 피어가 GetRecord로 찾을 수 없다.
             swarm
                 .behaviour_mut()
                 .kademlia
-                .set_mode(Some(kad::Mode::Client));
+                .set_mode(Some(kad::Mode::Server));
 
             // 수동 피어 연결
             for addr in &config.manual_peers {
@@ -108,6 +110,15 @@ pub async fn run_event_loop(
         tokio::select! {
             // 네트워크 이벤트 처리
             event = swarm.select_next_some() => {
+                // mDNS로 발견한 피어를 Kademlia 라우팅 테이블에 등록해야
+                // DHT PutRecord/GetRecord가 그 피어를 경유해 동작한다.
+                if let SwarmEvent::Behaviour(super::behaviour::AppBehaviourEvent::Mdns(
+                    mdns::Event::Discovered(ref peers)
+                )) = event {
+                    for (peer_id, addr) in peers {
+                        swarm.behaviour_mut().kademlia.add_address(peer_id, addr.clone());
+                    }
+                }
                 handle_swarm_event(event, &event_tx).await;
             }
 

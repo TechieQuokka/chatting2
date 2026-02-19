@@ -539,7 +539,7 @@ fn handle_app_event(screen: &mut Screen, event: AppEvent) {
         AppEvent::UrlNotFound => {
             if let Screen::InviteEntry(s) = screen {
                 s.step = InviteStep::Failed(
-                    format!("'{}' 을(를) 찾을 수 없습니다.\n상대방이 초대 코드를 먼저 생성해야 합니다.", s.url_input)
+                    format!("'{}' 방을 찾을 수 없습니다.\n상대방이 해당 방에 입장한 상태여야 합니다.", s.url_input)
                 );
             }
         }

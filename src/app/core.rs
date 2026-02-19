@@ -968,23 +968,27 @@ impl AppCore {
         }
     }
 
-    /// user_id → 전체 방 목록을 DHT에 PUT한다.
+    /// 방 이름 → room_id 를 DHT에 PUT한다.
     ///
-    /// 방 입장 시 및 초대 코드 생성 시 호출되어 피초대자가 user_id로 방을 탐색할 수 있게 한다.
+    /// 방 입장 시 및 초대 코드 생성 시 호출되어 피초대자가 방 이름으로 room_id를 탐색할 수 있게 한다.
+    /// 각 방마다 `hash_url(방이름)` 키로 별도 레코드를 등록한다.
     async fn put_url_record(&mut self) {
-        let url_key = crate::invite::hash_url(&self.user_id).to_vec();
-        let url_entries: Vec<crate::invite::UrlRoomEntry> = self.room_store.all()
+        let rooms: Vec<_> = self.room_store.all()
             .iter()
-            .map(|r| crate::invite::UrlRoomEntry {
-                room_id: r.room_id,
-                identifier: r.name.clone(),
-            })
+            .map(|r| (r.room_id, r.name.clone()))
             .collect();
-        if let Ok(url_bytes) = crate::invite::encode_url_record(&url_entries) {
-            self.net_tx.send(crate::network::event::NetworkCommand::PutRecord {
-                key: url_key,
-                value: url_bytes,
-            }).await.ok();
+        for (room_id, name) in rooms {
+            let url_key = crate::invite::hash_url(&name).to_vec();
+            let entry = vec![crate::invite::UrlRoomEntry {
+                room_id,
+                identifier: name,
+            }];
+            if let Ok(url_bytes) = crate::invite::encode_url_record(&entry) {
+                self.net_tx.send(crate::network::event::NetworkCommand::PutRecord {
+                    key: url_key,
+                    value: url_bytes,
+                }).await.ok();
+            }
         }
     }
 

@@ -489,11 +489,11 @@ fn render_invite_entry(frame: &mut Frame, state: &InviteEntryState, lang: Lang) 
 
     match &state.step {
         InviteStep::UrlInput => {
-            let lbl = if lang == Lang::English { "Inviter's ID" } else { "초대자 ID" };
+            let lbl = if lang == Lang::English { "Room name" } else { "방 이름" };
             let hint = if lang == Lang::English {
-                "e.g. alice  (leave empty to skip)"
+                "e.g. test.dev1  (leave empty to skip)"
             } else {
-                "예: alice  (비우면 건너뜀)"
+                "예: test.dev1  (비우면 건너뜀)"
             };
             frame.render_widget(
                 Paragraph::new(format!("{lbl} : [{}]", state.url_input)),
@@ -509,10 +509,10 @@ fn render_invite_entry(frame: &mut Frame, state: &InviteEntryState, lang: Lang) 
             );
         }
         InviteStep::UrlLookingUp => {
-            let lbl = if lang == Lang::English { "Looking up rooms..." } else { "방 목록 조회 중..." };
+            let lbl = if lang == Lang::English { "Looking up room..." } else { "방 조회 중..." };
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    format!("ID: {}", state.url_input),
+                    format!("방: {}", state.url_input),
                     Style::default().fg(Color::Yellow),
                 )),
                 Rect::new(inner.x, inner.y, inner.width, 1),
@@ -545,7 +545,7 @@ fn render_invite_entry(frame: &mut Frame, state: &InviteEntryState, lang: Lang) 
             );
         }
         InviteStep::CodeInput => {
-            let id_lbl = if lang == Lang::English { "Inviter's ID" } else { "초대자 ID" };
+            let id_lbl = if lang == Lang::English { "Room" } else { "방 이름" };
             frame.render_widget(
                 Paragraph::new(format!("{id_lbl} : {}", state.url_input)),
                 Rect::new(inner.x, inner.y, inner.width, 1),
