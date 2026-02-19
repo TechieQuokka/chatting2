@@ -969,5 +969,7 @@ fn parse_chat_command(text: String, s: &mut ChatState) -> TuiAction {
             });
         }
     }
+    // 피드에 항목이 추가된 경우 자동 스크롤
+    s.feed_scroll = s.feed.len().saturating_sub(1);
     TuiAction::None
 }
