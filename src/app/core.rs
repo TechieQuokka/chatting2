@@ -76,6 +76,9 @@ pub struct AppCore {
     // ── mDNS 피어 목록 (인트라넷 모드 초대용) ────────────────────────────────
     mdns_peers: HashMap<PeerId, Multiaddr>,
 
+    // ── 현재 방 피어 목록 (DHT Provider 기반) ─────────────────────────────────
+    room_peers: HashMap<PeerId, Multiaddr>,
+
     // ── 초대 관리 ─────────────────────────────────────────────────────────────
     invite_manager: InviteManager,
     /// 수신된 InviteRequest의 응답 채널 (초대 번호 → (발신 PeerId, ResponseChannel)).
@@ -128,6 +131,7 @@ impl AppCore {
             seeding_manager,
             active_room: None,
             mdns_peers: HashMap::new(),
+            room_peers: HashMap::new(),
             invite_manager: InviteManager::default(),
             pending_invite_channels: HashMap::new(),
             invite_counter: 0,
@@ -403,7 +407,8 @@ impl AppCore {
             }
 
             AppCommand::ListPeers => {
-                let peers: Vec<(PeerId, String)> = self.mdns_peers
+                // 현재 방의 피어만 표시 (DHT Provider 기반)
+                let peers: Vec<(PeerId, String)> = self.room_peers
                     .iter()
                     .map(|(id, addr)| (*id, addr.to_string()))
                     .collect();
@@ -832,6 +837,9 @@ impl AppCore {
         // 방 퇴장 시 PeerBitfields 초기화 (다음 방 입장에서 재구성)
         self.peer_bitfields = PeerBitfields::default();
 
+        // 방 피어 목록 초기화
+        self.room_peers.clear();
+
         self.app_tx.send(AppEvent::LeftRoom).await.ok();
     }
 
@@ -1176,6 +1184,10 @@ impl AppCore {
             NetworkEvent::MdnsDiscovered(peers) => {
                 for (peer_id, addr) in peers {
                     self.mdns_peers.insert(*peer_id, addr.clone());
+                    // 현재 방 멤버가 연결되면 room_peers도 업데이트
+                    if self.room_peers.contains_key(peer_id) {
+                        self.room_peers.insert(*peer_id, addr.clone());
+                    }
                 }
                 self.emit_mdns_update().await;
             }
@@ -1184,6 +1196,14 @@ impl AppCore {
                     self.mdns_peers.remove(peer_id);
                 }
                 self.emit_mdns_update().await;
+            }
+            NetworkEvent::PeerConnected(peer_id) => {
+                // 토렌트 방식: 연결 성공 시 room_peers에 실제 주소 반영
+                if self.room_peers.contains_key(peer_id) {
+                    if let Some(addr) = self.mdns_peers.get(peer_id) {
+                        self.room_peers.insert(*peer_id, addr.clone());
+                    }
+                }
             }
             _ => {}
         }
@@ -1388,9 +1408,34 @@ impl AppCore {
                     .ok();
             }
 
-            // 활성 방과 일치하면 각 Provider에게 BitfieldRequest 전송 (입장 동기화)
+            // 활성 방과 일치하면 토렌트 방식 적용: 모든 Provider에게 자동 연결 시도
             let active_room_id = self.active_room.as_ref().map(|r| r.room_id);
             if active_room_id == Some(room_id) {
+                // 현재 방의 피어 목록 갱신 (자신 제외)
+                self.room_peers.clear();
+                for provider in &providers {
+                    if *provider == my_peer_id {
+                        continue; // 자신 제외
+                    }
+                    // mdns_peers에서 multiaddr 가져오기, 없으면 PeerId 기반 placeholder 사용
+                    let addr = self.mdns_peers.get(provider)
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            // Fallback: PeerId를 문자열로 변환 (실제 연결 가능한 주소는 libp2p가 관리)
+                            format!("/p2p/{}", provider).parse().unwrap()
+                        });
+                    self.room_peers.insert(*provider, addr);
+                }
+
+                // 토렌트 방식 (10-file-transfer.md:9): DHT provider 전원에게 즉시 연결 시도
+                // max_connections 제한 내에서 Full mesh 구성 → 파일 전송 효율 최대화
+                for provider in &providers {
+                    if *provider == my_peer_id {
+                        continue;
+                    }
+                    self.net_tx.send(NetworkCommand::DialPeerId { peer: *provider }).await.ok();
+                }
+
                 for provider in providers {
                     if provider == my_peer_id {
                         continue; // 자신에게는 요청하지 않음

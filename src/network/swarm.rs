@@ -320,6 +320,10 @@ fn handle_command(cmd: NetworkCommand, swarm: &mut Swarm<AppBehaviour>) {
         DialPeer { addr } => {
             swarm.dial(addr).ok();
         }
+        DialPeerId { peer } => {
+            // PeerId로 직접 dial (libp2p가 알려진 주소 사용)
+            swarm.dial(peer).ok();
+        }
         AddKadAddress { peer_id, addr } => {
             swarm
                 .behaviour_mut()

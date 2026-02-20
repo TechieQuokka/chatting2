@@ -107,6 +107,8 @@ pub enum NetworkCommand {
     // ── 연결 관리 ─────────────────────────────────────────────────────────────
     /// 수동 피어 주소 연결
     DialPeer { addr: libp2p::Multiaddr },
+    /// PeerId로 직접 연결 (토렌트 방식: DHT provider 자동 연결용)
+    DialPeerId { peer: PeerId },
     /// Kademlia에 피어 주소 추가
     AddKadAddress {
         peer_id: PeerId,

@@ -501,6 +501,12 @@ fn handle_app_event(screen: &mut Screen, invite_queue: &mut Vec<(String, String,
                     };
                 }
             }
+            // Chat 화면 상태바 피어 수도 DHT 기반으로 동기화
+            if let Screen::Chat(s) = screen {
+                if s.room_id == room_id {
+                    s.peer_count = count;
+                }
+            }
         }
 
         AppEvent::InviteCodeGenerated { code, my_id } => {
@@ -618,7 +624,7 @@ fn handle_app_event(screen: &mut Screen, invite_queue: &mut Vec<(String, String,
 
         AppEvent::PeerList { peers } => {
             if peers.is_empty() {
-                add_system_feed(screen, "접속 피어: 0명 (mDNS 탐색된 로컬 피어 없음)".into());
+                add_system_feed(screen, "접속 피어: 0명".into());
             } else {
                 add_system_feed(screen, format!("접속 피어: {}명", peers.len()));
                 for (id, addr) in &peers {
