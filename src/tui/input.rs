@@ -53,7 +53,7 @@ pub fn handle_key(screen: &mut Screen, key: KeyEvent) -> TuiAction {
 // ── 공통 텍스트 입력 처리 ─────────────────────────────────────────────────────
 
 fn push_char(buf: &mut String, c: char) {
-    if buf.len() < 64 { buf.push(c); }
+    if buf.len() < 1024 { buf.push(c); }
 }
 
 fn pop_char(buf: &mut String) {
@@ -797,14 +797,34 @@ fn handle_chat(s: &mut ChatState, key: KeyEvent) -> TuiAction {
         // 만료 시 /quit만 허용
         if key.code == KeyCode::Enter && s.input.trim() == "/quit" {
             s.input.clear();
+            s.cursor_pos = 0;
             return TuiAction::CommandAndGoto(
                 AppCommand::LeaveRoom,
                 Screen::MainMenu(MainMenuState::default()),
             );
         }
+        // input_disabled 상태에서도 기본 입력은 허용 (표시만 비활성화)
         match key.code {
-            KeyCode::Backspace => pop_char(&mut s.input),
-            KeyCode::Char(c) => push_char(&mut s.input, c),
+            KeyCode::Backspace => {
+                if s.cursor_pos > 0 {
+                    let char_idx = s.cursor_pos - 1;
+                    if let Some((byte_idx, _)) = s.input.char_indices().nth(char_idx) {
+                        let char_len = s.input[byte_idx..].chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+                        s.input.drain(byte_idx..byte_idx + char_len);
+                        s.cursor_pos -= 1;
+                    }
+                }
+            }
+            KeyCode::Char(c) => {
+                if s.input.chars().count() < 1024 {
+                    if let Some((byte_idx, _)) = s.input.char_indices().nth(s.cursor_pos) {
+                        s.input.insert(byte_idx, c);
+                    } else {
+                        s.input.push(c);
+                    }
+                    s.cursor_pos += 1;
+                }
+            }
             _ => {}
         }
         return TuiAction::None;
@@ -814,13 +834,64 @@ fn handle_chat(s: &mut ChatState, key: KeyEvent) -> TuiAction {
         KeyCode::Enter => {
             let text = s.input.trim().to_string();
             s.input.clear();
+            s.cursor_pos = 0;
             if text.is_empty() { return TuiAction::None; }
 
             // 커맨드 파싱
             return parse_chat_command(text, s);
         }
-        KeyCode::Backspace => pop_char(&mut s.input),
-        KeyCode::Char(c) => push_char(&mut s.input, c),
+        KeyCode::Backspace => {
+            // 커서 위치에서 한 문자 삭제
+            if s.cursor_pos > 0 {
+                let char_idx = s.cursor_pos - 1;
+                if let Some((byte_idx, _)) = s.input.char_indices().nth(char_idx) {
+                    let char_len = s.input[byte_idx..].chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+                    s.input.drain(byte_idx..byte_idx + char_len);
+                    s.cursor_pos -= 1;
+                }
+            }
+        }
+        KeyCode::Delete => {
+            // 커서 위치의 문자 삭제 (커서는 그대로)
+            if s.cursor_pos < s.input.chars().count() {
+                if let Some((byte_idx, _)) = s.input.char_indices().nth(s.cursor_pos) {
+                    let char_len = s.input[byte_idx..].chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+                    s.input.drain(byte_idx..byte_idx + char_len);
+                }
+            }
+        }
+        KeyCode::Char(c) => {
+            // 커서 위치에 문자 삽입
+            if s.input.chars().count() < 1024 {
+                if let Some((byte_idx, _)) = s.input.char_indices().nth(s.cursor_pos) {
+                    s.input.insert(byte_idx, c);
+                } else {
+                    s.input.push(c);
+                }
+                s.cursor_pos += 1;
+            }
+        }
+        KeyCode::Left => {
+            // 커서 왼쪽 이동
+            if s.cursor_pos > 0 {
+                s.cursor_pos -= 1;
+            }
+        }
+        KeyCode::Right => {
+            // 커서 오른쪽 이동
+            let char_count = s.input.chars().count();
+            if s.cursor_pos < char_count {
+                s.cursor_pos += 1;
+            }
+        }
+        KeyCode::Home => {
+            // 커서 맨 앞으로
+            s.cursor_pos = 0;
+        }
+        KeyCode::End => {
+            // 커서 맨 뒤로
+            s.cursor_pos = s.input.chars().count();
+        }
         KeyCode::Up => {
             if s.feed_scroll > 0 { s.feed_scroll -= 1; }
         }
@@ -855,13 +926,17 @@ fn parse_chat_command(text: String, s: &mut ChatState) -> TuiAction {
             return TuiAction::Command(AppCommand::ShareFile { path });
         }
         Ok(Command::Download { target, .. }) => {
-            // 파일 이름으로 StartDownload (file_hash와 chunk_count는 FileAnnounce에서 가져와야 함)
-            let msg = format!("다운로드 요청: {} (파일 목록에서 선택하세요)", target);
-            use crate::room::RoomStore;
-            s.feed.push(FeedItem {
-                timestamp_ms: RoomStore::now_ms(),
-                content: FeedContent::Command(msg),
-            });
+            // 번호로 다운로드 (/list에서 표시된 [1], [2] 등)
+            if let Ok(number) = target.parse::<u32>() {
+                return TuiAction::Command(AppCommand::DownloadFileByNumber { number });
+            } else {
+                let msg = format!("! 다운로드 번호는 숫자여야 합니다: {}", target);
+                use crate::room::RoomStore;
+                s.feed.push(FeedItem {
+                    timestamp_ms: RoomStore::now_ms(),
+                    content: FeedContent::System(msg),
+                });
+            }
         }
         Ok(Command::Pause { number }) => {
             return TuiAction::Command(AppCommand::PauseDownload { number });
@@ -927,7 +1002,7 @@ fn parse_chat_command(text: String, s: &mut ChatState) -> TuiAction {
                 " 파일 공유",
                 "  /share <경로>      파일 또는 폴더 공유 등록",
                 "  /list              이 방의 공유 파일 목록 표시",
-                "  /download <파일>   파일 다운로드 요청",
+                "  /download <번호>   파일 다운로드 시작 (목록의 번호 사용)",
                 "  /downloads         진행 중인 다운로드 목록",
                 "  /seed              시딩 중인 파일 목록",
                 " 다운로드 관리",

@@ -15,6 +15,7 @@ use crate::network::event::{NetworkCommand, NetworkEvent};
 use crate::protocol::gossip::{self, GossipPayload};
 use crate::room::{RoomKey, RoomLifetime, RoomRecord, RoomStore};
 use crate::transfer::{DownloadManager, PeerBitfields, SeedingManager};
+use crate::tui::render::format_size;
 
 use super::channels::{AppCommand, AppCommandRx, AppEvent, AppEventTx};
 use super::router::route_network_event;
@@ -72,6 +73,8 @@ pub struct AppCore {
 
     // ── 현재 방 ──────────────────────────────────────────────────────────────
     active_room: Option<ActiveRoom>,
+    /// 현재 방에서 공유 중인 파일 목록 (모든 피어, file_hash → FileAnnounce).
+    available_files: HashMap<[u8; 32], crate::protocol::gossip::FileAnnounce>,
 
     // ── mDNS 피어 목록 (인트라넷 모드 초대용) ────────────────────────────────
     mdns_peers: HashMap<PeerId, Multiaddr>,
@@ -130,6 +133,7 @@ impl AppCore {
             download_manager,
             seeding_manager,
             active_room: None,
+            available_files: HashMap::new(),
             mdns_peers: HashMap::new(),
             room_peers: HashMap::new(),
             invite_manager: InviteManager::default(),
@@ -284,6 +288,24 @@ impl AppCore {
             // ── 파일 전송 ──────────────────────────────────────────────────
             AppCommand::ShareFile { path } => {
                 self.share_file(path).await;
+            }
+
+            AppCommand::DownloadFileByNumber { number } => {
+                // /list에서 표시된 번호로 다운로드
+                if number == 0 || number as usize > self.available_files.len() {
+                    self.app_tx.send(AppEvent::Error(format!("잘못된 번호: {}", number))).await.ok();
+                } else {
+                    // available_files의 n번째 항목 가져오기
+                    if let Some(announce) = self.available_files.values().nth((number - 1) as usize) {
+                        if let Some(first_file) = announce.files.first() {
+                            self.start_download(
+                                first_file.file_hash,
+                                announce.name.clone(),
+                                first_file.chunk_count,
+                            ).await;
+                        }
+                    }
+                }
             }
 
             AppCommand::StartDownload { file_hash, file_name, chunk_count } => {
@@ -642,20 +664,16 @@ impl AppCore {
 
             // ── 목록 조회 ──────────────────────────────────────────────────
             AppCommand::ListFiles => {
-                if self.seeding_manager.entries.is_empty() {
-                    self.app_tx.send(AppEvent::Notice("공유 중인 파일 없음".into())).await.ok();
+                if self.available_files.is_empty() {
+                    self.app_tx.send(AppEvent::Notice("이 방에 공유된 파일 없음".into())).await.ok();
                 } else {
                     self.app_tx.send(AppEvent::Notice(format!(
-                        "공유 중인 파일 ({}개):", self.seeding_manager.entries.len()
+                        "이 방의 공유 파일 ({}개):", self.available_files.len()
                     ))).await.ok();
-                    for (i, e) in self.seeding_manager.entries.iter().enumerate() {
-                        let status = match e.status {
-                            crate::transfer::seeding::SeedStatus::Active => "시딩",
-                            crate::transfer::seeding::SeedStatus::AutoPaused => "자동정지",
-                            crate::transfer::seeding::SeedStatus::ManualPaused => "정지",
-                        };
+                    for (i, announce) in self.available_files.values().enumerate() {
+                        let size_str = format_size(announce.total_size);
                         self.app_tx.send(AppEvent::Notice(format!(
-                            "  [{}] {} ({})", i + 1, e.file_name, status
+                            "  [{}] {} ({})", i + 1, announce.name, size_str
                         ))).await.ok();
                     }
                 }
@@ -881,6 +899,9 @@ impl AppCore {
         // 방 퇴장 시 PeerBitfields 초기화 (다음 방 입장에서 재구성)
         self.peer_bitfields = PeerBitfields::default();
 
+        // 방 파일 목록 초기화
+        self.available_files.clear();
+
         // 방 피어 목록 초기화
         self.room_peers.clear();
 
@@ -979,8 +1000,19 @@ impl AppCore {
     }
 
     async fn start_download(&mut self, file_hash: [u8; 32], file_name: String, chunk_count: u32) {
-        let download_path = std::path::PathBuf::from(&self.config.download_path).join(&file_name);
+        let download_dir = std::path::PathBuf::from(&self.config.download_path);
+        // 다운로드 디렉토리가 없으면 생성
+        if let Err(e) = std::fs::create_dir_all(&download_dir) {
+            self.app_tx.send(AppEvent::Error(format!("다운로드 디렉토리 생성 실패: {e}"))).await.ok();
+            return;
+        }
+        let download_path = download_dir.join(&file_name);
         self.download_manager.add(file_hash, file_name.clone(), chunk_count, download_path);
+
+        // 새 다운로드를 Active 상태로 변경 (DownloadEntry::new는 AutoPaused로 시작)
+        if let Some(entry) = self.download_manager.entries.iter_mut().find(|e| e.file_hash == file_hash) {
+            entry.status = crate::transfer::DownloadStatus::Active;
+        }
 
         let msg = format!("[↓] '{}' 다운로드 시작", file_name);
         self.app_tx.send(AppEvent::FeedEntry(crate::chat::LogEntry::file_event(&msg))).await.ok();
@@ -1241,15 +1273,14 @@ impl AppCore {
                 }
                 self.emit_mdns_update().await;
             }
-            NetworkEvent::PeerConnected(peer_id) => {
+            NetworkEvent::PeerConnected { peer_id, addr } => {
                 // 토렌트 방식: 연결 성공 시 room_peers에 실제 주소 반영
                 if self.room_peers.contains_key(peer_id) {
-                    if let Some(addr) = self.mdns_peers.get(peer_id) {
-                        self.room_peers.insert(*peer_id, addr.clone());
-                    }
+                    // 실제 연결된 주소로 업데이트 (placeholder 교체)
+                    self.room_peers.insert(*peer_id, addr.clone());
                 }
             }
-            NetworkEvent::GossipMessage { source: Some(peer_id), .. } => {
+            NetworkEvent::GossipMessage { source: Some(peer_id), data, .. } => {
                 // 토렌트 방식: GossipSub 메시지 수신 = 상대가 방 멤버 (이벤트 기반 갱신)
                 if self.active_room.is_some() && !self.room_peers.contains_key(peer_id) {
                     let addr = self.mdns_peers.get(peer_id)
@@ -1257,10 +1288,33 @@ impl AppCore {
                         .unwrap_or_else(|| format!("/p2p/{}", peer_id).parse().unwrap());
                     self.room_peers.insert(*peer_id, addr);
 
+                    // 연결 시도 (PeerConnected 이벤트에서 실제 주소로 교체됨)
+                    self.net_tx.send(NetworkCommand::DialPeerId { peer: *peer_id }).await.ok();
+
                     // 상태바 업데이트를 위해 RoomPeerCount 이벤트 발생
                     if let Some(ref active) = self.active_room {
                         let count = self.room_peers.len() as u32;
                         self.app_tx.send(AppEvent::RoomPeerCount { room_id: active.room_id, count }).await.ok();
+                    }
+                }
+
+                // FileAnnounce 메시지 처리: available_files에 저장 + BitfieldRequest 전송
+                if let Some(ref room) = self.active_room {
+                    if let Ok(payload) = gossip::decode(data, &room.key.0) {
+                        if let GossipPayload::FileAnnounce(announce) = payload {
+                            // file_hash는 files[0]에서 가져옴
+                            if let Some(first_file) = announce.files.first() {
+                                self.available_files.insert(first_file.file_hash, announce);
+
+                                // 새 파일 공유 시 해당 피어에게 BitfieldRequest 전송
+                                // → peer_bitfields 업데이트 → 다운로드 가능
+                                let room_id = room.room_id;
+                                self.net_tx.send(NetworkCommand::SendRequest {
+                                    peer: *peer_id,
+                                    request: AppRequest::BitfieldRequest { room_id },
+                                }).await.ok();
+                            }
+                        }
                     }
                 }
             }
@@ -1354,9 +1408,19 @@ impl AppCore {
         let room_id = room.room_id;
 
         for (file_hash, bitfield_bytes) in files {
-            let chunk_count = self.room_store.get(&room_id)
-                .and_then(|r| r.files.iter().find(|f| f.file_hash == file_hash))
-                .map(|f| f.chunk_count)
+            // available_files에서 chunk_count 가져오기 (방의 공유 파일)
+            let chunk_count = self.available_files.values()
+                .find_map(|announce| {
+                    announce.files.iter()
+                        .find(|f| f.file_hash == file_hash)
+                        .map(|f| f.chunk_count)
+                })
+                .or_else(|| {
+                    // room_store에서도 확인 (자신이 공유한 파일)
+                    self.room_store.get(&room_id)
+                        .and_then(|r| r.files.iter().find(|f| f.file_hash == file_hash))
+                        .map(|f| f.chunk_count)
+                })
                 .unwrap_or(0);
 
             if chunk_count > 0 {
@@ -1399,10 +1463,16 @@ impl AppCore {
         let file_name = entry.file_name.clone();
         let chunk_count = entry.chunk_count;
 
-        // rooms.enc에서 chunk_hashes 조회
-        let chunk_hashes: Vec<[u8; 32]> = self.room_store.get(&room_id)
-            .and_then(|r| r.files.iter().find(|f| f.file_hash == file_hash))
+        // chunk_hashes 조회: available_files 우선, room_store는 fallback
+        let chunk_hashes: Vec<[u8; 32]> = self.available_files.get(&file_hash)
+            .and_then(|announce| announce.files.iter().find(|f| f.file_hash == file_hash))
             .map(|f| f.chunk_hashes.clone())
+            .or_else(|| {
+                // fallback: room_store에서도 조회 (자신이 공유한 파일)
+                self.room_store.get(&room_id)
+                    .and_then(|r| r.files.iter().find(|f| f.file_hash == file_hash))
+                    .map(|f| f.chunk_hashes.clone())
+            })
             .unwrap_or_default();
 
         match crate::transfer::transfer_loop::handle_chunk_response(
@@ -1428,6 +1498,13 @@ impl AppCore {
                     }).await.ok();
                 }
                 if completed {
+                    // 완료된 다운로드의 .bf 파일 삭제
+                    if let Some(entry) = self.download_manager.entries.iter()
+                        .find(|e| e.file_hash == file_hash)
+                    {
+                        let bf_path = entry.bf_path();
+                        let _ = std::fs::remove_file(&bf_path);
+                    }
                     self.app_tx.send(AppEvent::DownloadComplete { file_hash, file_name }).await.ok();
                 }
             }
@@ -1528,6 +1605,9 @@ impl AppCore {
                         .cloned()
                         .unwrap_or_else(|| format!("/p2p/{}", peer).parse().unwrap());
                     self.room_peers.insert(peer, addr);
+
+                    // 연결 시도 (이미 연결되어 있으면 무시됨, PeerConnected에서 실제 주소로 교체)
+                    self.net_tx.send(NetworkCommand::DialPeerId { peer }).await.ok();
 
                     // 상태바 업데이트를 위해 RoomPeerCount 이벤트 발생
                     if let Some(ref active) = self.active_room {

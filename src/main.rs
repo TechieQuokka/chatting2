@@ -13,6 +13,9 @@ mod room;
 mod transfer;
 mod tui;
 
+/// 최대 피드 항목 수 (메모리/성능 최적화)
+const MAX_FEED_ITEMS: usize = 1000;
+
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -195,6 +198,27 @@ async fn run_pre_login(
 
         let ev = match event::read() {
             Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => k,
+            Ok(Event::Paste(text)) => {
+                // 붙여넣기 처리 (Chat 화면에서만)
+                if let Screen::Chat(s) = &mut screen {
+                    // 줄바꿈 제거 (채팅은 한 줄 입력)
+                    let text = text.replace('\n', "").replace('\r', "");
+
+                    // 최대 1024자 제한
+                    let current_len = s.input.chars().count();
+                    let available = 1024usize.saturating_sub(current_len);
+                    let to_insert: String = text.chars().take(available).collect();
+
+                    // 커서 위치에 삽입
+                    if let Some((byte_idx, _)) = s.input.char_indices().nth(s.cursor_pos) {
+                        s.input.insert_str(byte_idx, &to_insert);
+                    } else {
+                        s.input.push_str(&to_insert);
+                    }
+                    s.cursor_pos += to_insert.chars().count();
+                }
+                continue;
+            }
             _ => continue,
         };
 
@@ -362,6 +386,10 @@ async fn run_tui_loop(
                             content: FeedContent::Invite(msg),
                         });
                     }
+                    // 피드 제한: 최대 MAX_FEED_ITEMS개 유지
+                    if s.feed.len() > MAX_FEED_ITEMS {
+                        s.feed.drain(0..s.feed.len() - MAX_FEED_ITEMS);
+                    }
                     s.feed_scroll = s.feed.len().saturating_sub(1);
                 }
             }
@@ -375,6 +403,27 @@ async fn run_tui_loop(
 
         let ev = match event::read() {
             Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => k,
+            Ok(Event::Paste(text)) => {
+                // 붙여넣기 처리 (Chat 화면에서만)
+                if let Screen::Chat(s) = &mut screen {
+                    // 줄바꿈 제거 (채팅은 한 줄 입력)
+                    let text = text.replace('\n', "").replace('\r', "");
+
+                    // 최대 1024자 제한
+                    let current_len = s.input.chars().count();
+                    let available = 1024usize.saturating_sub(current_len);
+                    let to_insert: String = text.chars().take(available).collect();
+
+                    // 커서 위치에 삽입
+                    if let Some((byte_idx, _)) = s.input.char_indices().nth(s.cursor_pos) {
+                        s.input.insert_str(byte_idx, &to_insert);
+                    } else {
+                        s.input.push_str(&to_insert);
+                    }
+                    s.cursor_pos += to_insert.chars().count();
+                }
+                continue;
+            }
             _ => continue,
         };
 
@@ -436,6 +485,10 @@ fn handle_app_event(screen: &mut Screen, invite_queue: &mut Vec<(String, String,
                     timestamp_ms: entry.timestamp_ms,
                     content,
                 });
+                // 피드 제한: 최대 MAX_FEED_ITEMS개 유지
+                if s.feed.len() > MAX_FEED_ITEMS {
+                    s.feed.drain(0..s.feed.len() - MAX_FEED_ITEMS);
+                }
                 // 자동 스크롤 (피드 끝에 도달 시)
                 s.feed_scroll = s.feed.len().saturating_sub(1);
             }
@@ -518,6 +571,10 @@ fn handle_app_event(screen: &mut Screen, invite_queue: &mut Vec<(String, String,
                         format!("[초대 코드] {code}  |  내 ID: {my_id}  (3분간 유효)")
                     ),
                 });
+                // 피드 제한: 최대 MAX_FEED_ITEMS개 유지
+                if s.feed.len() > MAX_FEED_ITEMS {
+                    s.feed.drain(0..s.feed.len() - MAX_FEED_ITEMS);
+                }
                 s.feed_scroll = s.feed.len().saturating_sub(1);
             }
         }
@@ -534,6 +591,10 @@ fn handle_app_event(screen: &mut Screen, invite_queue: &mut Vec<(String, String,
                     timestamp_ms: RoomStore::now_ms(),
                     content: FeedContent::Invite(msg),
                 });
+                // 피드 제한: 최대 MAX_FEED_ITEMS개 유지
+                if s.feed.len() > MAX_FEED_ITEMS {
+                    s.feed.drain(0..s.feed.len() - MAX_FEED_ITEMS);
+                }
                 s.feed_scroll = s.feed.len().saturating_sub(1);
             } else {
                 // Chat 화면 밖에 있으면 큐에 누적 — 방 입장 시 피드로 표시
@@ -550,6 +611,10 @@ fn handle_app_event(screen: &mut Screen, invite_queue: &mut Vec<(String, String,
                         format!("[파일] {} 공유됨 ({})", announce.name, format_size(announce.total_size))
                     ),
                 });
+                // 피드 제한: 최대 MAX_FEED_ITEMS개 유지
+                if s.feed.len() > MAX_FEED_ITEMS {
+                    s.feed.drain(0..s.feed.len() - MAX_FEED_ITEMS);
+                }
                 s.feed_scroll = s.feed.len().saturating_sub(1);
             }
         }
@@ -680,7 +745,11 @@ fn add_system_feed(screen: &mut Screen, msg: String) {
             timestamp_ms: RoomStore::now_ms(),
             content: FeedContent::System(msg),
         });
-        s.feed_scroll = s.feed.len().saturating_sub(1);
+        // 피드 제한: 최대 MAX_FEED_ITEMS개 유지
+        if s.feed.len() > MAX_FEED_ITEMS {
+            s.feed.drain(0..s.feed.len() - MAX_FEED_ITEMS);
+        }
+        s.feed_scroll = 5000; // 자동 스크롤: 맨 아래로 (충분히 큰 값)
     }
 }
 

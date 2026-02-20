@@ -141,8 +141,11 @@ async fn handle_swarm_event(
 
     let net_event = match event {
         // 연결 이벤트
-        SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-            Some(NetworkEvent::PeerConnected(peer_id))
+        SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+            Some(NetworkEvent::PeerConnected {
+                peer_id,
+                addr: endpoint.get_remote_address().clone(),
+            })
         }
         SwarmEvent::ConnectionClosed { peer_id, .. } => {
             Some(NetworkEvent::PeerDisconnected(peer_id))

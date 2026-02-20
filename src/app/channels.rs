@@ -43,6 +43,7 @@ pub enum AppCommand {
 
     // ── 파일 ─────────────────────────────────────────────────────────────────
     ShareFile { path: String },
+    DownloadFileByNumber { number: u32 },
     StartDownload { file_hash: [u8; 32], file_name: String, chunk_count: u32 },
     /// 선택적 다운로드에서 여러 파일 동시 다운로드 (12-tui.md: 파일 선택 화면).
     StartDownloads { files: Vec<([ u8; 32], String, u32)> }, // (file_hash, file_name, chunk_count)

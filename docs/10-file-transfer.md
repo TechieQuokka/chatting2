@@ -27,8 +27,8 @@
 
 ## 다운로드 흐름
 
-1. `/list` → 공유 파일 목록 확인
-2. `/download <파일>` 실행
+1. `/list` → 공유 파일 목록 확인 (번호와 함께 표시)
+2. `/download <번호>` 실행 (예: `/download 1`)
 3. 피어별 bitfield 확인 (방 입장 시 수신한 정보 + BitfieldUpdate)
 4. 여러 피어에게 동시 ChunkRequest 전송 (Rarest-first)
 5. ChunkResponse 수신 → SHA-256 해시 검증
@@ -139,8 +139,8 @@ download/
 
 | 명령어 | 설명 |
 |--------|------|
-| `/download <파일>` | 파일 전체 다운로드 시작 |
-| `/download <폴더> --select` | 선택적 다운로드 화면 진입 |
+| `/download <번호>` | 파일 전체 다운로드 시작 (/list에서 표시된 번호 사용) |
+| `/download <번호> --select` | 선택적 다운로드 화면 진입 (폴더인 경우) |
 | `/downloads` | 전체 다운로드 현황 목록 |
 | `/pause <번호>` | 다운로드 일시정지 |
 | `/resume <번호>` | 다운로드 재개 |

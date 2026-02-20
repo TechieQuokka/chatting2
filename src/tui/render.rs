@@ -921,13 +921,15 @@ fn render_chat(frame: &mut Frame, state: &mut ChatState, lang: Lang) {
     // ── 피드 ─────────────────────────────────────────────────────────────────
     let feed_height = chunks[2].height as usize;
     let feed_len = state.feed.len();
+
+    // 안전한 스크롤 계산 (항목 수 기준)
     let scroll_offset = if feed_len > feed_height {
         let max_scroll = feed_len - feed_height;
         state.feed_scroll.min(max_scroll)
     } else {
         0
     };
-    // feed_scroll을 항상 유효 범위로 클램핑 — 초과 누적 방지
+    // feed_scroll을 항상 유효 범위로 클램핑
     state.feed_scroll = scroll_offset;
 
     let visible_feed: Vec<Line> = state.feed.iter()
@@ -948,11 +950,54 @@ fn render_chat(frame: &mut Frame, state: &mut ChatState, lang: Lang) {
         Style::default()
     };
     let disabled_lbl = if lang == Lang::English { "(disabled)" } else { "(비활성화)" };
-    let prompt = if state.input_disabled { disabled_lbl } else { &state.input };
-    frame.render_widget(
-        Paragraph::new(format!("> {}", prompt)).style(input_style),
-        chunks[3],
-    );
+
+    if state.input_disabled {
+        // 비활성화 상태: 비활성화 레이블 표시
+        frame.render_widget(
+            Paragraph::new(format!("> {}", disabled_lbl)).style(input_style),
+            chunks[3],
+        );
+    } else {
+        // 커서 기반 가로 스크롤
+        let available_width = chunks[3].width.saturating_sub(2) as usize; // "> " 프롬프트 제외
+        let char_count = state.input.chars().count();
+        let cursor_pos = state.cursor_pos.min(char_count);
+
+        // 스크롤 윈도우 계산: 커서가 항상 보이도록
+        let (window_start, display_cursor_x) = if char_count <= available_width {
+            // 입력이 화면보다 짧음: 전체 표시
+            (0, cursor_pos)
+        } else {
+            // 입력이 화면보다 김: 커서 중심으로 윈도우 계산
+            if cursor_pos < available_width / 2 {
+                // 커서가 앞쪽: 처음부터 표시
+                (0, cursor_pos)
+            } else if cursor_pos > char_count - available_width / 2 {
+                // 커서가 뒤쪽: 끝부분 표시
+                (char_count - available_width, cursor_pos - (char_count - available_width))
+            } else {
+                // 커서가 중간: 커서 중심으로 표시
+                let start = cursor_pos - available_width / 2;
+                (start, available_width / 2)
+            }
+        };
+
+        // 윈도우에 맞게 입력 문자열 자르기
+        let display_input: String = state.input.chars()
+            .skip(window_start)
+            .take(available_width)
+            .collect();
+
+        frame.render_widget(
+            Paragraph::new(format!("> {}", display_input)).style(input_style),
+            chunks[3],
+        );
+
+        // 커서 렌더링
+        let cursor_screen_x = chunks[3].x + 2 + display_cursor_x as u16; // "> " 다음 위치
+        let cursor_screen_y = chunks[3].y;
+        frame.set_cursor_position((cursor_screen_x, cursor_screen_y));
+    }
 
 }
 
@@ -987,7 +1032,7 @@ fn feed_item_to_line(item: &FeedItem) -> Line<'static> {
 
 // ── 유틸 ────────────────────────────────────────────────────────────────────
 
-fn format_size(bytes: u64) -> String {
+pub fn format_size(bytes: u64) -> String {
     if bytes >= 1024 * 1024 * 1024 {
         format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     } else if bytes >= 1024 * 1024 {

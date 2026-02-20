@@ -278,6 +278,7 @@ pub struct ChatState {
 
     /// 입력창.
     pub input: String,
+    pub cursor_pos: usize,  // 커서 위치 (바이트 인덱스가 아닌 문자 인덱스)
     pub input_disabled: bool,
 
     /// 활성 다운로드 요약 (최대 3개 표시).

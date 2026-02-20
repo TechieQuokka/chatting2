@@ -8,7 +8,7 @@ use super::codec::{AppRequest, AppResponse};
 #[derive(Debug)]
 pub enum NetworkEvent {
     // ── 피어 연결 ─────────────────────────────────────────────────────────────
-    PeerConnected(PeerId),
+    PeerConnected { peer_id: PeerId, addr: Multiaddr },
     PeerDisconnected(PeerId),
 
     // ── mDNS 발견 ─────────────────────────────────────────────────────────────

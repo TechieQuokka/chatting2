@@ -107,9 +107,14 @@ pub fn parse(input: &str) -> Result<Command, ParseError> {
             Ok(Command::Reject { number })
         }
         "share" => {
-            let path = rest.join(" ").trim().to_string();
+            let mut path = rest.join(" ").trim().to_string();
             if path.is_empty() {
                 return Err(ParseError::MissingArgument("share <경로>".to_string()));
+            }
+            // 따옴표 제거 (Windows 경로의 공백 처리용)
+            if (path.starts_with('"') && path.ends_with('"'))
+                || (path.starts_with('\'') && path.ends_with('\'')) {
+                path = path[1..path.len()-1].to_string();
             }
             Ok(Command::Share { path })
         }

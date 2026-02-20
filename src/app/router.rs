@@ -19,7 +19,7 @@ pub async fn route_network_event(
 ) {
     match event {
         // ── 피어 연결/해제 ────────────────────────────────────────────────────
-        NetworkEvent::PeerConnected(peer_id) => {
+        NetworkEvent::PeerConnected { peer_id, .. } => {
             app_tx.send(AppEvent::PeerJoined {
                 peer_id,
                 nickname: String::new(), // Identify 수신 전까지 빈 닉네임
@@ -61,13 +61,8 @@ pub async fn route_network_event(
                 }
 
                 GossipPayload::FileAnnounce(announce) => {
-                    let msg = format!("[파일] {} 공유됨 ({} bytes)", announce.name, announce.total_size);
-                    let file_entry = LogEntry::file_event(&msg);
-                    if let Some(log) = chat_log {
-                        log.append(&file_entry).ok();
-                    }
+                    // main.rs에서 FileAnnounced 처리 시 피드 추가 + 로그 기록하므로 여기서는 전달만
                     app_tx.send(AppEvent::FileAnnounced { announce: announce.clone() }).await.ok();
-                    app_tx.send(AppEvent::FeedEntry(file_entry)).await.ok();
                 }
 
                 GossipPayload::FileRemove(remove) => {
