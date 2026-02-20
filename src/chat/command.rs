@@ -14,6 +14,7 @@ pub enum Command {
     Approve { number: Option<u32> },
     Reject { number: Option<u32> },
     Help,
+    Refresh,
 
     // ── 파일 공유 ─────────────────────────────────────────────────────────────
     Share { path: String },
@@ -80,6 +81,7 @@ pub fn parse(input: &str) -> Result<Command, ParseError> {
         "list" => Ok(Command::List),
         "downloads" => Ok(Command::Downloads),
         "seed" => Ok(Command::Seed),
+        "refresh" => Ok(Command::Refresh),
 
         "add" => {
             let n = parse_number(rest.first().copied(), "add")?;

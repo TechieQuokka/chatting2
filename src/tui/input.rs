@@ -896,6 +896,9 @@ fn parse_chat_command(text: String, s: &mut ChatState) -> TuiAction {
         Ok(Command::Peers) => {
             return TuiAction::Command(AppCommand::ListPeers);
         }
+        Ok(Command::Refresh) => {
+            return TuiAction::Command(AppCommand::Refresh);
+        }
         Ok(Command::Nick { nickname }) => {
             return TuiAction::Command(AppCommand::ChangeNickname { new_nickname: nickname });
         }
@@ -916,6 +919,7 @@ fn parse_chat_command(text: String, s: &mut ChatState) -> TuiAction {
                 " 채팅 / 방",
                 "  /quit              방에서 나가기",
                 "  /peers             접속 중인 피어 목록 표시",
+                "  /refresh           방 상태 재동기화 (피어/파일/bitfield)",
                 "  /nick <닉네임>     닉네임 변경",
                 "  /invite            초대 코드 생성",
                 "  /approve [번호]    초대 수락 (/accept 도 동일)",

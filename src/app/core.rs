@@ -415,6 +415,50 @@ impl AppCore {
                 self.app_tx.send(AppEvent::PeerList { peers }).await.ok();
             }
 
+            AppCommand::Refresh => {
+                // 방 전체 상태 재동기화
+                let Some(ref active) = self.active_room else {
+                    self.app_tx.send(AppEvent::Error("방에 입장하지 않았습니다.".into())).await.ok();
+                    return false;
+                };
+
+                let room_id = active.room_id;
+
+                // 피드에 시스템 메시지 추가
+                self.app_tx
+                    .send(AppEvent::FeedEntry(crate::chat::log::LogEntry::system("방 상태를 새로고침하는 중...")))
+                    .await
+                    .ok();
+
+                // 1. 피어 목록 재동기화 (DHT GetProviders)
+                self.net_tx
+                    .send(NetworkCommand::GetProviders { key: room_id.to_vec() })
+                    .await
+                    .ok();
+
+                // 2. 파일 목록 재동기화 (DHT GetRecord)
+                self.net_tx
+                    .send(NetworkCommand::GetRecord { key: room_id.to_vec() })
+                    .await
+                    .ok();
+
+                // 3. 모든 room_peers에게 BitfieldRequest 재전송
+                for peer_id in self.room_peers.keys() {
+                    self.net_tx
+                        .send(NetworkCommand::SendRequest {
+                            peer: *peer_id,
+                            request: AppRequest::BitfieldRequest { room_id },
+                        })
+                        .await
+                        .ok();
+                }
+
+                self.app_tx
+                    .send(AppEvent::FeedEntry(crate::chat::log::LogEntry::system("새로고침 완료")))
+                    .await
+                    .ok();
+            }
+
             // ── 초대 코드 ─────────────────────────────────────────────────
             AppCommand::GenerateInviteCode => {
                 self.generate_invite_code().await;
@@ -1205,6 +1249,21 @@ impl AppCore {
                     }
                 }
             }
+            NetworkEvent::GossipMessage { source: Some(peer_id), .. } => {
+                // 토렌트 방식: GossipSub 메시지 수신 = 상대가 방 멤버 (이벤트 기반 갱신)
+                if self.active_room.is_some() && !self.room_peers.contains_key(peer_id) {
+                    let addr = self.mdns_peers.get(peer_id)
+                        .cloned()
+                        .unwrap_or_else(|| format!("/p2p/{}", peer_id).parse().unwrap());
+                    self.room_peers.insert(*peer_id, addr);
+
+                    // 상태바 업데이트를 위해 RoomPeerCount 이벤트 발생
+                    if let Some(ref active) = self.active_room {
+                        let count = self.room_peers.len() as u32;
+                        self.app_tx.send(AppEvent::RoomPeerCount { room_id: active.room_id, count }).await.ok();
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -1458,6 +1517,28 @@ impl AppCore {
     /// - BitfieldRequest: 현재 방의 파일 bitfield를 응답.
     async fn handle_inbound_request(&mut self, event: NetworkEvent) {
         let NetworkEvent::InboundRequest { peer, request, channel } = event else { return };
+
+        // 토렌트 방식: BitfieldRequest/ChunkRequest 수신 = 상대가 방 멤버
+        // 이벤트 기반으로 room_peers 실시간 갱신 (주기적 polling 불필요)
+        match &request {
+            AppRequest::BitfieldRequest { .. } | AppRequest::ChunkRequest { .. } => {
+                if self.active_room.is_some() && !self.room_peers.contains_key(&peer) {
+                    // mdns_peers에서 주소 가져오기, 없으면 placeholder
+                    let addr = self.mdns_peers.get(&peer)
+                        .cloned()
+                        .unwrap_or_else(|| format!("/p2p/{}", peer).parse().unwrap());
+                    self.room_peers.insert(peer, addr);
+
+                    // 상태바 업데이트를 위해 RoomPeerCount 이벤트 발생
+                    if let Some(ref active) = self.active_room {
+                        let count = self.room_peers.len() as u32;
+                        self.app_tx.send(AppEvent::RoomPeerCount { room_id: active.room_id, count }).await.ok();
+                    }
+                }
+            }
+            _ => {}
+        }
+
         match request {
             AppRequest::InviteRequest { room_id, .. } => {
                 let room_name = self.room_store
