@@ -881,9 +881,7 @@ fn render_chat(frame: &mut Frame, state: &mut ChatState, lang: Lang) {
     } else {
         let up = format_bps(state.upload_bps);
         let down = format_bps(state.download_bps);
-        let up_lbl = t(lang, Key::UploadLabel);
-        let dn_lbl = t(lang, Key::DownloadLabel);
-        format!(" room: {} │ peers:{} │ {up_lbl}:{up} {dn_lbl}:{down}", state.room_name, state.peer_count)
+        format!(" room: {} │ peers:{} │ ↑{} ↓{}", state.room_name, state.peer_count, up, down)
     };
     frame.render_widget(
         Paragraph::new(status_text).style(Style::default().bg(Color::DarkGray)),
@@ -897,15 +895,17 @@ fn render_chat(frame: &mut Frame, state: &mut ChatState, lang: Lang) {
         // 12-tui.md: 최대 3개 표시, 3개 초과 시 마지막 줄을 요약으로 대체
         let mut lines: Vec<Line> = state.active_downloads.iter().take(3).map(|dl| {
             let bps = format_bps(dl.bps);
-            Line::raw(format!(" [↓] {:<20} {:>5.1}%  {}", dl.file_name, dl.pct, bps))
+            let progress_bar = render_progress_bar(dl.pct, 10);
+            Line::raw(format!(" [↓] {:<16} {} {:>3.0}%  {}",
+                truncate_filename(&dl.file_name, 16), progress_bar, dl.pct, bps))
         }).collect();
 
         if state.active_downloads.len() > 3 {
             let extra = state.active_downloads.len() - 2;
             let more_lbl = if lang == Lang::English {
-                format!(" +{extra} more in progress...  /downloads")
+                format!(" +{extra} more in progress...           /downloads")
             } else {
-                format!(" 외 {extra}개 진행 중...  /downloads")
+                format!(" 외 {extra}개 진행 중...              /downloads")
             };
             lines.truncate(2);
             lines.push(Line::raw(more_lbl));
@@ -1031,6 +1031,23 @@ fn feed_item_to_line(item: &FeedItem) -> Line<'static> {
 }
 
 // ── 유틸 ────────────────────────────────────────────────────────────────────
+
+/// 프로그레스 바 렌더링 (예: ████████░░ for 80%)
+fn render_progress_bar(pct: f32, width: usize) -> String {
+    let filled = ((pct / 100.0) * width as f32).round() as usize;
+    let empty = width.saturating_sub(filled);
+    format!("{}{}", "█".repeat(filled), "░".repeat(empty))
+}
+
+/// 파일명이 max_len보다 길면 끝을 ...으로 truncate
+fn truncate_filename(name: &str, max_len: usize) -> String {
+    if name.chars().count() <= max_len {
+        name.to_string()
+    } else {
+        let truncated: String = name.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{}...", truncated)
+    }
+}
 
 pub fn format_size(bytes: u64) -> String {
     if bytes >= 1024 * 1024 * 1024 {
